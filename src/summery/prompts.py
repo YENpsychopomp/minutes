@@ -48,6 +48,31 @@ def _extra_rule(custom: str | None) -> str:
     return f"\n其他要求：{custom}" if custom else ""
 
 
+def _source_rule(source_kind: str | None) -> str:
+    """文件輸入時提醒模型：沒有時間軸、編號是文件段落。"""
+    if source_kind == "document":
+        return (
+            "\n輸入來源：使用者上傳的文件（會議筆記、逐字稿或過往紀錄），不是語音轉錄；"
+            "[n] 是文件段落編號，沒有時間軸，不要編造時間。"
+        )
+    return ""
+
+
+def _reference_rule(reference: str | None) -> str:
+    """過往會議紀錄（範本）抽出的人名與術語：用來校正聽錯的專有名詞。"""
+    if not reference:
+        return ""
+    return (
+        "\n參考過往會議紀錄（範本）：\n" + reference.strip()
+        + "\n人名、職稱、單位與專有名詞請沿用範本寫法；內容中發音相近或疑似聽錯的詞，以範本寫法為準。"
+        "範本只用來對齊用語，不可把範本裡的舊內容當成本次內容。"
+    )
+
+
+def _tail_rules(custom: str | None, source_kind: str | None, reference: str | None) -> str:
+    return _source_rule(source_kind) + _reference_rule(reference) + _extra_rule(custom)
+
+
 # --------------------------------------------------------------------------
 # map：單一區塊筆記
 # --------------------------------------------------------------------------
@@ -63,7 +88,7 @@ MAP_SYSTEM_TMPL = """你是勝任的會議與影音內容分析助手。任務�
 輸出格式：
 {{"summary": "3～6 句的重點摘要", "key_points": ["重點 1", "..."], "terms": ["專有名詞或關鍵術語"], "issues": ["疑點或聽不清楚之處"]}}"""
 
-MAP_USER_TMPL = """【時間區間】{clock_start} – {clock_end}（區塊 {block_no}/{block_total}）
+MAP_USER_TMPL = """【{range_label}】{clock_start} – {clock_end}（區塊 {block_no}/{block_total}）
 【逐字稿】
 {text}
 
@@ -71,12 +96,14 @@ MAP_USER_TMPL = """【時間區間】{clock_start} – {clock_end}（區塊 {blo
 
 
 def map_prompt(
-    text: str, *, clock_start: str, clock_end: str, block_no: int, block_total: int, language: str, style: str, custom: str | None = None
+    text: str, *, clock_start: str, clock_end: str, block_no: int, block_total: int, language: str, style: str,
+    custom: str | None = None, source_kind: str | None = None, reference: str | None = None,
 ) -> tuple[str, str]:
     system = MAP_SYSTEM_TMPL.format(
         lang=_lang_rule(language), _JSON_RULE=_JSON_RULE
-    ) + _extra_rule(custom)
+    ) + _tail_rules(custom, source_kind, reference)
     user = MAP_USER_TMPL.format(
+        range_label="段落範圍" if source_kind == "document" else "時間區間",
         clock_start=clock_start, clock_end=clock_end, block_no=block_no, block_total=block_total, text=text
     )
     return system, user
@@ -104,9 +131,11 @@ REDUCE_USER_TMPL = """【涵蓋時間】{clock_start} – {clock_end}（彙整�
 
 
 def reduce_prompt(
-    notes_text: str, *, clock_start: str, clock_end: str, round_no: int, group_index: int, group_count: int, language: str, style: str, custom: str | None = None
+    notes_text: str, *, clock_start: str, clock_end: str, round_no: int, group_index: int, group_count: int,
+    language: str, style: str, custom: str | None = None, source_kind: str | None = None, reference: str | None = None,
 ) -> tuple[str, str]:
-    system = REDUCE_SYSTEM_TMPL.format(lang=_lang_rule(language), _JSON_RULE=_JSON_RULE) + _extra_rule(custom)
+    system = REDUCE_SYSTEM_TMPL.format(lang=_lang_rule(language), _JSON_RULE=_JSON_RULE) + _tail_rules(
+        custom, source_kind, reference)
     user = REDUCE_USER_TMPL.format(
         clock_start=clock_start, clock_end=clock_end, round_no=round_no,
         group_index=group_index, group_count=group_count, notes=notes_text,
@@ -145,14 +174,14 @@ FINAL_SYSTEM_TMPL = """你是資深影音內容編輯。根據提供的逐字稿
  "open_questions": [{{"text": "待釐清問題", "para": 編號或 null}}],
  "quotes": [{{"text": "原話", "speaker": "說者", "para": 編號或 null}}]}}"""
 
-FINAL_USER_TMPL = """【媒體長度】{duration}（逐字稿約 {chars} 字）
+FINAL_USER_TMPL = """{length_line}
 【輸入形態】{input_kind}
 【內容】
 {text}
 
 請輸出最終摘要 JSON。"""
 
-FINAL_USER_NOTES_TMPL = """【媒體長度】{duration}（逐字稿約 {chars} 字，全部共 {para_total} 個編號段落）
+FINAL_USER_NOTES_TMPL = """{length_line}（全部共 {para_total} 個編號段落）
 【輸入形態】分區筆記（由長逐字稿逐段彙整而來；每份筆記都標明「段落 a-b」）
 【章節編號規則】可引用的段落編號範圍是 1 ～ {para_total}。
   ・chapters 的 para_start / para_end 必須取自各份筆記標示的「段落 a-b」範圍。
@@ -169,26 +198,37 @@ FINAL_USER_NOTES_TMPL = """【媒體長度】{duration}（逐字稿約 {chars} �
 請輸出最終摘要 JSON。"""
 
 
+def _length_line(duration: str, chars: int, source_kind: str | None, documents: int) -> str:
+    if source_kind == "document":
+        return f"【輸入文件】{max(1, documents)} 份（約 {chars} 字）"
+    return f"【媒體長度】{duration}（逐字稿約 {chars} 字）"
+
+
 def final_prompt(
-    text: str, *, duration: str, chars: int, language: str, style: str, custom: str | None = None
+    text: str, *, duration: str, chars: int, language: str, style: str, custom: str | None = None,
+    source_kind: str | None = None, reference: str | None = None, documents: int = 1,
 ) -> tuple[str, str]:
     system = FINAL_SYSTEM_TMPL.format(
         lang=_lang_rule(language), style_rule=_style_rule(style), _JSON_RULE=_JSON_RULE
-    ) + _extra_rule(custom)
-    user = FINAL_USER_TMPL.format(duration=duration, chars=chars, text=text, input_kind="完整逐字稿")
+    ) + _tail_rules(custom, source_kind, reference)
+    user = FINAL_USER_TMPL.format(
+        length_line=_length_line(duration, chars, source_kind, documents), text=text,
+        input_kind="文件全文" if source_kind == "document" else "完整逐字稿",
+    )
     return system, user
 
 
 def final_prompt_notes(
     notes_text: str, *, duration: str, chars: int, para_total: int, head: str, tail: str,
-    language: str, style: str, custom: str | None = None,
+    language: str, style: str, custom: str | None = None, source_kind: str | None = None,
+    reference: str | None = None, documents: int = 1,
 ) -> tuple[str, str]:
     system = FINAL_SYSTEM_TMPL.format(
         lang=_lang_rule(language), style_rule=_style_rule(style), _JSON_RULE=_JSON_RULE
-    ) + _extra_rule(custom)
+    ) + _tail_rules(custom, source_kind, reference)
     user = FINAL_USER_NOTES_TMPL.format(
-        duration=duration, chars=chars, para_total=para_total, notes=notes_text,
-        head=head or "（無）", tail=tail or "（無）", input_kind="分區筆記",
+        length_line=_length_line(duration, chars, source_kind, documents), para_total=para_total,
+        notes=notes_text, head=head or "（無）", tail=tail or "（無）", input_kind="分區筆記",
     )
     return system, user
 
@@ -203,3 +243,82 @@ TITLE_SYSTEM_TMPL = """根據內容给出 1 個不超過 24 字的標題。{lang
 
 def title_prompt(text: str, *, language: str) -> tuple[str, str]:
     return TITLE_SYSTEM_TMPL.format(lang=_lang_rule(language)), text[:6000]
+
+
+# --------------------------------------------------------------------------
+# 範本分析：從過往會議紀錄抽出格式與用語
+# --------------------------------------------------------------------------
+
+REFERENCE_SYSTEM_TMPL = """你是會議紀錄格式分析助手。任務：閱讀使用者提供的「過往會議紀錄」，整理出撰寫新紀錄時可以沿用的格式與用語。
+{lang}
+原則：
+1. outline 依範本出現順序列出段落標題，原樣保留編號與用字（例如「一、討論事項」「（一）」「決議：」）。
+2. header_fields 列出範本開頭的基本欄位名稱（例如 會議名稱、時間、地點、主席、出席人員、記錄），只寫欄位名稱，不寫舊的值。
+3. attendees 列出範本中出現的與會者姓名（可附職稱）；terms 列出單位、系統、專案等專有名詞的標準寫法。
+4. style_notes 用 3～8 條描述版面與語氣（例如「決議以『決議：』開頭」「待辦以表格列出負責人與期限」「正式公文語氣」）。
+5. 不要摘要範本的內容；範本中的日期、決議、數字都是舊資料。
+{_JSON_RULE}
+輸出格式：
+{{"title_pattern": "標題寫法，例如『○○會議第 N 次會議紀錄』", "header_fields": ["欄位名稱"], "outline": ["段落標題"], "attendees": ["姓名（職稱）"], "terms": ["專有名詞"], "style_notes": ["版面或語氣說明"]}}"""
+
+REFERENCE_USER_TMPL = """【過往會議紀錄（共 {count} 份）】
+{text}
+
+請輸出範本格式分析 JSON。"""
+
+
+def reference_prompt(text: str, *, count: int, language: str) -> tuple[str, str]:
+    system = REFERENCE_SYSTEM_TMPL.format(lang=_lang_rule(language), _JSON_RULE=_JSON_RULE)
+    return system, REFERENCE_USER_TMPL.format(count=max(1, count), text=text)
+
+
+# --------------------------------------------------------------------------
+# 會議紀錄：依範本（或預設格式）把整理結果寫成正式紀錄
+# --------------------------------------------------------------------------
+
+MINUTES_SYSTEM_TMPL = """你是專業的會議紀錄撰寫人員。根據「本次會議整理結果」撰寫一份正式、可以直接發出的會議紀錄（Markdown）。
+{lang}
+原則：
+1. {structure_rule}
+2. 內容只能來自「本次會議整理結果」；範本裡的舊日期、舊決議、舊待辦、舊數字一律不可沿用。
+3. 範本有、但本次沒有資訊的欄位，寫「（未提及）」，不要編造。
+4. 人名、職稱、單位與專有名詞的寫法以範本為準。
+5. 決議與待辦要完整列出；待辦附上負責人與期限（未提及就寫「未標明」）。
+6. {anchor_rule}
+7. 直接輸出 Markdown 本文：不要 code fence，不要前言或結語說明。"""
+
+_STRUCTURE_TEMPLATE = (
+    "段落結構、標題層級、編號方式、欄位順序與語氣沿用範本（見【範本格式分析】與【範本原文節錄】）；"
+    "範本的段落順序不要更動。"
+)
+_STRUCTURE_DEFAULT = (
+    "使用標準會議紀錄格式：# 標題；## 會議資訊（時間、地點、主席、出席人員、記錄，未提及者寫「（未提及）」）；"
+    "## 討論事項（依議題分小節，每節寫重點與結論）；## 決議事項；## 待辦事項（表格：事項｜負責人｜期限）；## 待釐清問題。"
+)
+
+MINUTES_USER_TMPL = """{template_block}【本次會議整理結果】
+{summary}
+
+請輸出會議紀錄 Markdown。"""
+
+
+def minutes_prompt(
+    summary_json: str, *, profile_json: str | None, excerpt: str | None, language: str,
+    source_kind: str | None, custom: str | None = None,
+) -> tuple[str, str]:
+    anchor = (
+        "內容來自文件，沒有時間軸：不要編造時間；需要標出處時用段落編號（例如「（段落 12）」）。"
+        if source_kind == "document"
+        else "討論事項可在小節標題後註明對應的影音時間（例如「（00:12:30）」），方便回放核對；沒有就不寫。"
+    )
+    system = MINUTES_SYSTEM_TMPL.format(
+        lang=_lang_rule(language),
+        structure_rule=_STRUCTURE_TEMPLATE if profile_json else _STRUCTURE_DEFAULT,
+        anchor_rule=anchor,
+    ) + _extra_rule(custom)
+    block = ""
+    if profile_json:
+        block += f"【範本格式分析】\n{profile_json}\n\n"
+    if excerpt:
+        block += f"【範本原文節錄（只參考格式與用語，內容是舊的）】\n{excerpt}\n\n"
+    return system, MINUTES_USER_TMPL.format(template_block=block, summary=summary_json)

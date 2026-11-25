@@ -126,6 +126,22 @@ class Summary:
     quotes: list[dict] = field(default_factory=list)
     notes: list[Note] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
+    #: 依範本（或預設會議紀錄格式）撰寫的正式會議紀錄，沒有產生時為空字串
+    minutes_markdown: str = ""
+
+    @property
+    def is_document(self) -> bool:
+        """輸入是文件（沒有時間軸）：章節與問題以段落編號標示。"""
+        return self.meta.get("input_kind") == "document"
+
+    def _chapter_dicts(self) -> list[dict]:
+        out = []
+        for chapter in self.chapters:
+            data = chapter.to_dict()
+            if self.is_document:
+                data["clock"] = _para_label(chapter.para_start, chapter.para_end)
+            out.append(data)
+        return out
 
     def to_dict(self) -> dict:
         return {
@@ -134,12 +150,13 @@ class Summary:
             "tldr": self.tldr,
             "overview": self.overview,
             "key_points": self.key_points,
-            "chapters": [c.to_dict() for c in self.chapters],
+            "chapters": self._chapter_dicts(),
             "keywords": self.keywords,
             "decisions": self.decisions,
             "action_items": self.action_items,
             "open_questions": [q.to_dict() for q in self.open_questions],
             "quotes": self.quotes,
+            "minutes_markdown": self.minutes_markdown,
             "meta": self.meta,
         }
 
@@ -150,9 +167,14 @@ class Summary:
 
     def to_markdown(self, *, duration: float | None = None, with_notes: bool = False) -> str:
         lines: list[str] = []
-        lines.append(f"# {self.title or '影音摘要'}")
+        lines.append(f"# {self.title or ('會議紀錄' if self.is_document else '影音摘要')}")
         lines.append("")
-        if duration:
+        if self.is_document:
+            names = [str(d.get("name")) for d in self.meta.get("documents") or [] if isinstance(d, dict)]
+            if names:
+                lines.append(f"> 來源文件：{'、'.join(names)}")
+                lines.append("")
+        elif duration:
             lines.append(f"> 長度 {fmt_clock(duration, force_hours=True)}")
             lines.append("")
         if self.tldr:
@@ -164,7 +186,7 @@ class Summary:
         if self.chapters:
             lines += ["## 章節摘要", ""]
             for ch in self.chapters:
-                head = fmt_clock(ch.start, force_hours=True)
+                head = _para_label(ch.para_start, ch.para_end) if self.is_document else fmt_clock(ch.start, force_hours=True)
                 lines.append(f"- **[{head}] {ch.title}**")
                 if ch.summary:
                     lines.append(f"  {ch.summary.strip()}")
@@ -208,6 +230,12 @@ class Summary:
                 lines.append(f"- [p{n.para_start}-{n.para_end}] {n.summary}")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
+
+
+def _para_label(start: int, end: int) -> str:
+    if not start:
+        return "段落 ?"
+    return f"段落 {start}" if not end or end == start else f"段落 {start}–{end}"
 
 
 # --------------------------------------------------------------------------
@@ -265,12 +293,18 @@ class Summarizer:
     def __init__(
         self, llm: LLMClient, cfg: SummarizeConfig, *, output_language: str | None = None,
         progress: ProgressFn | None = None, cancel: threading.Event | None = None,
+        reference_hint: str | None = None,
     ):
         self.llm = llm
         self.cfg = cfg
         self.progress = progress or (lambda *_: None)
         self.cancel = cancel or threading.Event()
         self.language = output_language or cfg.language
+        #: 過往會議紀錄抽出的人名／術語提示（見 minutes.ReferenceProfile.hint_text）
+        self.reference_hint = reference_hint
+        #: "document" 時改用段落編號、不放時間戳（由 summarize() 依逐字稿 meta 決定）
+        self.source_kind: str | None = None
+        self.documents = 1
         self.warnings: list[str] = []
 
     # -- 主流程 ----------------------------------------------------------
@@ -279,11 +313,16 @@ class Summarizer:
             gap=float(transcript.meta.get("paragraph_gap", 0.9)),
             max_chars=int(transcript.meta.get("paragraph_max_chars", 180)),
         )
+        is_document = transcript.meta.get("source_kind") == "document"
+        self.source_kind = "document" if is_document else None
+        self.documents = len(transcript.meta.get("documents") or []) or 1
         if not paras:
             return Summary(title=title_hint or "無內容摘要", tldr="逐字稿沒有可摘要的內容。",
-                           meta={"mode": "empty", "warnings": ["empty transcript"]})
+                           meta={"mode": "empty", "warnings": ["empty transcript"],
+                                 "input_kind": "document" if is_document else "media"})
         numbered = [
-            f"[{i}] [{fmt_clock(p.start, force_hours=True)}] {p.text}" if self.cfg.timestamp_lines else f"[{i}] {p.text}"
+            f"[{i}] [{fmt_clock(p.start, force_hours=True)}] {p.text}"
+            if self.cfg.timestamp_lines and not is_document else f"[{i}] {p.text}"
             for i, p in enumerate(paras, start=1)
         ]
         full_text = "\n".join(numbered)
@@ -297,13 +336,19 @@ class Summarizer:
             "context_budget_tokens": self.cfg.max_input_tokens,
             "language": self.language,
             "style": self.cfg.style,
+            "input_kind": "document" if is_document else "media",
         }
+        if is_document:
+            meta["documents"] = list(transcript.meta.get("documents") or [])
+        if self.reference_hint:
+            meta["reference_hint"] = True
 
         if total_tokens <= self.cfg.max_input_tokens:
             self.progress("summarize", 0.15, f"逐字稿約 {total_tokens} tokens，單次摘要")
             system, user = prompts.final_prompt(
                 full_text, duration=fmt_clock(duration, force_hours=True), chars=meta["chars"],
                 language=self.language, style=self.cfg.style, custom=self.cfg.custom_instruction,
+                **self._prompt_extras(documents=True),
             )
             payload = self._json_call(system, user, stub_key="final")
             summary = self._build_summary(payload, paras, notes=[], meta=meta, title_hint=title_hint)
@@ -344,7 +389,7 @@ class Summarizer:
         system, user = prompts.final_prompt_notes(
             notes_text, duration=fmt_clock(duration, force_hours=True), chars=meta["chars"],
             para_total=len(paras), head=head, tail=tail, language=self.language,
-            style=self.cfg.style, custom=self.cfg.custom_instruction,
+            style=self.cfg.style, custom=self.cfg.custom_instruction, **self._prompt_extras(documents=True),
         )
         meta["mode"] = "map-reduce"
         payload = self._json_call(system, user, stub_key="final")
@@ -376,10 +421,15 @@ class Summarizer:
 
     def _map_one(self, block: Block, index: int, total: int) -> Note:
         self._check_cancel()
+        if self.source_kind == "document":
+            clock_start, clock_end = f"段落 {block.para_start}", f"段落 {block.para_end}"
+        else:
+            clock_start = fmt_clock(block.start, force_hours=True)
+            clock_end = fmt_clock(block.end, force_hours=True)
         system, user = prompts.map_prompt(
-            block.text, clock_start=fmt_clock(block.start, force_hours=True),
-            clock_end=fmt_clock(block.end, force_hours=True), block_no=index + 1, block_total=total,
+            block.text, clock_start=clock_start, clock_end=clock_end, block_no=index + 1, block_total=total,
             language=self.language, style=self.cfg.style, custom=self.cfg.custom_instruction,
+            **self._prompt_extras(),
         )
         payload = self._json_call(system, user, stub_key=f"map:{index}")
         note = self._note_from_payload(payload, fallback=block)
@@ -421,6 +471,7 @@ class Summarizer:
             notes_text, clock_start=f"para {start_para}", clock_end=f"para {end_para}",
             round_no=round_no, group_index=index, group_count=count,
             language=self.language, style=self.cfg.style, custom=self.cfg.custom_instruction,
+            **self._prompt_extras(),
         )
         payload = self._json_call(system, user, stub_key=f"reduce:{round_no}:{index}")
         merged = self._note_from_payload(payload, fallback=None)
@@ -433,6 +484,12 @@ class Summarizer:
         return merged
 
     # -- helpers ---------------------------------------------------------
+    def _prompt_extras(self, *, documents: bool = False) -> dict:
+        extras: dict = {"source_kind": self.source_kind, "reference": self.reference_hint}
+        if documents:
+            extras["documents"] = self.documents
+        return extras
+
     def _json_call(self, system: str, user: str, *, stub_key: str | None = None):
         self._check_cancel()
         return self.llm.complete_json(system, user, stub_key=stub_key)
@@ -529,6 +586,9 @@ class Summarizer:
         if not tldr and notes:
             tldr = notes[0].summary[:160]
         open_questions, questions_timed = _normalize_open_questions(payload.get("open_questions"), paras)
+        if self.source_kind == "document":
+            for question in open_questions:  # 文件沒有時間軸：標成段落編號
+                question.clock = _para_label(question.para, question.para) if question.para else None
         if open_questions:
             # 讓使用者看得出來這些問題有沒有時間點可跳
             meta["open_questions_timed"] = f"{questions_timed}/{len(open_questions)}"

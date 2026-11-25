@@ -99,3 +99,15 @@ paragraph_gap = 0.9     # 相鄰 segment 間隔超過幾秒就換段
 paragraph_max_chars = 180
 keep_chunks = false     # true = 保留 chunk 檔（除錯／換模型重跑時有用）
 # stem = ""             # 輸出檔名前綴（null = 來源檔名）
+
+# ------------------------------------------------- 文件輸入與過往會議紀錄（範本）
+[documents]
+# PDF 交給 Microsoft markitdown 轉文字。未設定時依序嘗試：同環境 import markitdown →
+# PATH 上的 markitdown → conda 環境（例如 envs/markitdown/Scripts/markitdown.exe）。
+# 也可以寫整串指令，例："conda run -n markitdown markitdown"
+# markitdown_cmd = "C:/Users/me/anaconda3/envs/markitdown/Scripts/markitdown.exe"
+markitdown_timeout = 300.0   # 單一 PDF 轉換逾時（秒）
+reference_max_chars = 12000  # 範本分析時最多送給模型的範本字數（多份範本合計，各份依比例截斷）
+template_excerpt_chars = 4000 # 撰寫會議紀錄時附上的範本原文節錄（讓模型模仿版面與用語）
+paragraph_max_chars = 500    # 文件段落過長時依句子切小，章節才能細到「段落 a–b」
+minutes_max_output_tokens = 0 # 撰寫會議紀錄的輸出上限；0 = 沿用 llm.max_output_tokens

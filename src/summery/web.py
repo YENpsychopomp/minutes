@@ -2,17 +2,21 @@
 
 * 上傳影片/音訊 → 背景執行管線 → 輪詢進度 → 顯示逐字稿與摘要、下載各格式。
 * 上傳探用 raw body（``X-Filename`` 帶檔名），避免 multipart 解析的邊角問題。
+* 文件（筆記、過往會議紀錄）先 ``POST /api/documents`` 暫存並立即解析（PDF 缺 markitdown
+  之類的問題當場回報），建立工作時再以 ``inputs=``／``references=`` 帶入文件 ID。
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import mimetypes
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -23,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, ConfigError
+from .documents import DOCUMENT_EXT, DocumentError, KIND_LABEL, load_document, markitdown_status, unsupported_hint
 from .pipeline import JobError, JobOptions, Pipeline
 from .util import LOG, fmt_clock, read_json, slugify, write_json
 
@@ -31,6 +36,10 @@ RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".ts", ".mpg", ".mpeg"}
 AUDIO_EXT = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wma", ".amr", ".aiff", ".caf"}
 MAX_INLINE_CHARS = 200_000
+MEDIA_EXT = VIDEO_EXT | AUDIO_EXT
+#: 暫存上傳文件的子目錄（底線開頭：不會被當成工作）
+DOCS_DIRNAME = "_documents"
+DOC_ID_RE = re.compile(r"^d[0-9a-z]{6,40}$")
 
 
 def resolve_static_dir(explicit: str | Path | None = None) -> Path:
@@ -67,18 +76,23 @@ class JobRecord:
     created_at: float = field(default_factory=time.time)
     options: dict = field(default_factory=dict)
     historical: bool = False
+    #: media = 影音轉錄；document = 從文件產出會議紀錄
+    kind: str = "media"
 
     def input_path_for_web(self) -> str | None:
-        """可供瀏覽器播放的原始檔路徑（歷史工作的檔案可能已被移走）。"""
+        """可供瀏覽器播放的原始檔路徑（歷史工作的檔案可能已被移走；文件不能播放）。"""
         path = Path(self.input_path)
-        return str(path) if path.is_file() else None
+        return str(path) if path.is_file() and path.suffix.lower() in MEDIA_EXT else None
 
     def to_dict(self, state: dict | None = None) -> dict:
         data = {
             "job_id": self.job_id, "name": self.name, "status": self.status,
             "created_at": self.created_at, "error": self.error,
             "input": Path(self.input_path).name, "out_dir": self.out_dir,
-            "options": self.options,
+            "options": self.options, "kind": self.kind,
+            "references": [Path(r).name for r in self.options.get("references") or []],
+            "documents": [Path(self.input_path).name] + [Path(x).name for x in self.options.get("extra_inputs") or []]
+            if self.kind == "document" else [],
         }
         data.update({
             "stage": (state or {}).get("stage"),
@@ -112,7 +126,7 @@ class JobQueue:
         if not self.jobs_dir.is_dir():
             return
         for child in sorted(self.jobs_dir.iterdir(), reverse=True):
-            if not child.is_dir():
+            if not child.is_dir() or child.name.startswith(("_", ".")):
                 continue
             state = read_json(Path(self.cfg.work_dir).expanduser() / child.name / "state.json")
             state = state if isinstance(state, dict) else {}
@@ -122,16 +136,19 @@ class JobQueue:
             options = dict(state.get("options") or {})
             options["job_id"] = child.name
             options.setdefault("stem", slugify(child.name, 60))
+            input_path = str(state.get("input") or (inputs[0] if inputs else child))
+            kind = str(state.get("kind") or ("document" if Path(input_path).suffix.lower() in DOCUMENT_EXT else "media"))
             rec = JobRecord(
                 job_id=child.name,
                 name=Path(state.get("input") or (inputs[0].name if inputs else child.name)).name,
-                input_path=str(state.get("input") or (inputs[0] if inputs else child)),
+                input_path=input_path,
                 work_dir=str(Path(self.cfg.work_dir).expanduser() / child.name),
                 out_dir=str(child),
                 status=str(state.get("status") or "unknown"),
                 created_at=child.stat().st_mtime,
                 options=options,
                 historical=True,
+                kind=kind,
             )
             self.jobs[rec.job_id] = rec
 
@@ -361,7 +378,7 @@ def make_handler(cfg: Config, queue_obj: JobQueue, jobs_dir: Path, *, max_upload
             stem = Path(rec.options.get("stem") or slugify(Path(rec.name).stem, 60))
             out_dir = Path(rec.out_dir)
             files = []
-            for fmt in ("summary.md", "summary.json", "md", "json", "txt", "srt", "vtt"):
+            for fmt in ("minutes.md", "summary.md", "summary.json", "md", "json", "txt", "srt", "vtt"):
                 found = _find_output(out_dir, stem, fmt)
                 if found:
                     files.append({"format": fmt, "name": found.name, "size": found.stat().st_size,
@@ -403,34 +420,14 @@ def make_handler(cfg: Config, queue_obj: JobQueue, jobs_dir: Path, *, max_upload
             if path == "/api/jobs":
                 self._create_job(params)
                 return
+            if path == "/api/documents":
+                self._upload_document()
+                return
             self._json({"error": f"未知路徑 {path}"}, 404)
 
-        def _create_job(self, params: dict[str, str]) -> None:
-            raw_name = self.headers.get("X-Filename") or params.get("name") or "input.mp4"
-            filename = urllib.parse.unquote(raw_name)
-            ext = Path(filename).suffix.lower()
-            if ext not in VIDEO_EXT | AUDIO_EXT:
-                self._json({"error": f"不支援的檔案類型 {ext or '(無副檔名)'}"}, 400)
-                return
-            length = int(self.headers.get("Content-Length") or 0)
-            if not length:
-                self._json({"error": "上傳內容為空（需要 Content-Length）"}, 400)
-                return
-            if length > limit_bytes:
-                self._json({"error": f"檔案過大 {length / 1e6:.0f}MB，上限 {max_upload_mb}MB"}, 413)
-                return
-            safe_stem = slugify(Path(filename).stem, 48) or "upload"
-            # job_id 會出現在 URL 路徑上 → 僅使用 ASCII，原始檔名仍記錄在 record.name
-            tag = slugify(Path(filename).stem, 24, ascii_only=True)
-            tag = "upload" if tag in ("", "job") else tag  # 純中文檔名沒有 ASCII 可轉
-            fingerprint = hashlib.sha1(f"{filename}:{length}".encode("utf-8")).hexdigest()[:6]
-            nonce = f"{time.time_ns() % 1_000_000:06d}"  # 避免同一秒重複上傳時 job_id 撞號
-            rec_job_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{tag}-{fingerprint}-{nonce}"
-            job_dir = jobs_dir / rec_job_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            input_path = job_dir / f"{safe_stem}{ext}"
+        def _read_body_to(self, target: Path, length: int) -> int:
             received = 0
-            with input_path.open("wb") as fh:
+            with target.open("wb") as fh:
                 remaining = length
                 while remaining > 0:
                     chunk = self.rfile.read(min(remaining, 1 << 20))
@@ -439,18 +436,134 @@ def make_handler(cfg: Config, queue_obj: JobQueue, jobs_dir: Path, *, max_upload
                     fh.write(chunk)
                     received += len(chunk)
                     remaining -= len(chunk)
+            return received
+
+        def _body_length(self) -> int | None:
+            """回傳 Content-Length；過大時直接回 413 並回傳 None。"""
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > limit_bytes:
+                self._json({"error": f"檔案過大 {length / 1e6:.0f}MB，上限 {max_upload_mb}MB"}, 413)
+                return None
+            return length
+
+        def _upload_document(self) -> None:
+            """暫存一份文件並立即解析，讓使用者在送出前就知道讀不讀得到。"""
+            filename = urllib.parse.unquote(self.headers.get("X-Filename") or "")
+            ext = Path(filename).suffix.lower()
+            if ext not in DOCUMENT_EXT:
+                hint = unsupported_hint(filename) or "支援 .docx、.md、.txt、.pdf、.srt、.vtt、.json"
+                self._json({"error": f"不支援的文件類型 {ext or '(無副檔名)'}：{hint}"}, 400)
+                return
+            length = self._body_length()
+            if length is None:
+                return
+            if not length:
+                self._json({"error": "上傳內容為空（需要 Content-Length）"}, 400)
+                return
+            digest = hashlib.sha1(f"{filename}:{length}:{time.time_ns()}".encode("utf-8")).hexdigest()[:10]
+            doc_id = f"d{time.strftime('%Y%m%d%H%M%S')}{digest}"
+            folder = jobs_dir / DOCS_DIRNAME / doc_id
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / f"{slugify(Path(filename).stem, 60) or 'document'}{ext}"
+            received = self._read_body_to(target, length)
             if received != length:
+                shutil.rmtree(folder, ignore_errors=True)
                 self._json({"error": f"上傳不完整（{received}/{length} bytes）"}, 400)
                 return
-            options = _options_from_params(params, stem=safe_stem)
+            dcfg = cfg.documents
+            try:
+                doc = load_document(target, name=filename, markitdown_cmd=dcfg.markitdown_cmd,
+                                    markitdown_timeout=dcfg.markitdown_timeout,
+                                    paragraph_max_chars=dcfg.paragraph_max_chars)
+            except DocumentError as exc:
+                shutil.rmtree(folder, ignore_errors=True)
+                self._json({"error": str(exc)}, 422)
+                return
+            info = {"doc_id": doc_id, "size": received, **doc.info()}
+            write_json(folder / "info.json", info)
+            self._json(info, 201)
+
+        def _staged_documents(self, ids: str) -> list[tuple[Path, str]] | None:
+            """把 ``a,b,c`` 形式的文件 ID 換成 (暫存路徑, 原始檔名)；有錯就回 400 並回傳 None。"""
+            out: list[tuple[Path, str]] = []
+            for doc_id in [x.strip() for x in ids.split(",") if x.strip()]:
+                folder = jobs_dir / DOCS_DIRNAME / doc_id
+                info = read_json(folder / "info.json") if DOC_ID_RE.match(doc_id) else None
+                files = [p for p in folder.iterdir() if p.name != "info.json"] if isinstance(info, dict) else []
+                if not files:
+                    self._json({"error": f"找不到已上傳的文件 {doc_id}（可能服務已重啟），請重新上傳"}, 400)
+                    return None
+                out.append((files[0], str(info.get("name") or files[0].name)))
+            return out
+
+        def _create_job(self, params: dict[str, str]) -> None:
+            length = self._body_length()
+            if length is None:
+                return
+            inputs = self._staged_documents(params.get("inputs", ""))
+            references = self._staged_documents(params.get("references", ""))
+            if inputs is None or references is None:
+                return
+            filename = ""
+            if length:
+                raw_name = self.headers.get("X-Filename") or params.get("name") or "input.mp4"
+                filename = urllib.parse.unquote(raw_name)
+                ext = Path(filename).suffix.lower()
+                if ext not in MEDIA_EXT | DOCUMENT_EXT:
+                    hint = unsupported_hint(filename)
+                    self._json({"error": f"不支援的檔案類型 {ext or '(無副檔名)'}" + (f"：{hint}" if hint else "")}, 400)
+                    return
+                if ext in MEDIA_EXT and inputs:
+                    self._json({"error": "影音工作不能再附加輸入文件（過往紀錄請放在 references）"}, 400)
+                    return
+            elif not inputs:
+                self._json({"error": "上傳內容為空（需要 Content-Length，或以 inputs= 指定已上傳的文件）"}, 400)
+                return
+            else:
+                filename = inputs[0][1]
+            is_doc_job = Path(filename).suffix.lower() in DOCUMENT_EXT
+            safe_stem = slugify(Path(filename).stem, 48) or "upload"
+            # job_id 會出現在 URL 路徑上 → 僅使用 ASCII，原始檔名仍記錄在 record.name
+            tag = slugify(Path(filename).stem, 24, ascii_only=True)
+            tag = "upload" if tag in ("", "job") else tag  # 純中文檔名沒有 ASCII 可轉
+            fingerprint = hashlib.sha1(f"{filename}:{length}:{params.get('inputs', '')}".encode("utf-8")).hexdigest()[:6]
+            nonce = f"{time.time_ns() % 1_000_000:06d}"  # 避免同一秒重複上傳時 job_id 撞號
+            rec_job_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{tag}-{fingerprint}-{nonce}"
+            job_dir = jobs_dir / rec_job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            # 文件放在 inputs/：輸出的 <名稱>.txt 才不會蓋掉上傳的 <名稱>.txt
+            input_dir = job_dir / "inputs" if is_doc_job else job_dir
+            input_dir.mkdir(parents=True, exist_ok=True)
+            doc_paths: list[Path] = []
+            received = 0
+            if length:
+                input_path = input_dir / f"{safe_stem}{Path(filename).suffix.lower()}"
+                received = self._read_body_to(input_path, length)
+                if received != length:
+                    self._json({"error": f"上傳不完整（{received}/{length} bytes）"}, 400)
+                    return
+                doc_paths.append(input_path)
+            for staged, _name in inputs:
+                doc_paths.append(_copy_unique(staged, input_dir))
+            ref_paths = [_copy_unique(staged, job_dir / "references") for staged, _name in references]
+            # 輸出檔名基底與管線一致（管線用輸入檔名 slug），UI 才找得到輸出檔
+            options = _options_from_params(params, stem=slugify(doc_paths[0].stem, 60) or safe_stem)
             options["job_id"] = rec_job_id  # 讓 state.json 落在 record.work_dir，UI 才看得到進度
+            options["out_dir"] = str(job_dir)  # 文件放在 inputs/，輸出仍寫在工作目錄
+            if ref_paths:
+                options["references"] = [str(p) for p in ref_paths]
+            if len(doc_paths) > 1:
+                options["extra_inputs"] = [str(p) for p in doc_paths[1:]]
+            names = [filename] + [name for _p, name in (inputs[1:] if not length else inputs)]
+            display = filename if len(names) == 1 else f"{filename} 等 {len(names)} 份文件"
             rec = JobRecord(
-                job_id=job_dir.name, name=filename, input_path=str(input_path),
+                job_id=job_dir.name, name=display, input_path=str(doc_paths[0]),
                 work_dir=str(Path(cfg.work_dir).expanduser() / job_dir.name),
-                out_dir=str(job_dir), options=options,
+                out_dir=str(job_dir), options=options, kind="document" if is_doc_job else "media",
             )
             queue_obj.add(rec)
-            self._json({"job_id": rec.job_id, "name": rec.name, "status": rec.status, "size": received}, 202)
+            self._json({"job_id": rec.job_id, "name": rec.name, "status": rec.status, "size": received,
+                        "kind": rec.kind}, 202)
 
     return Handler
 
@@ -481,8 +594,24 @@ def _options_from_params(params: dict[str, str], *, stem: str) -> dict[str, Any]
         options["chapters"] = False
     if params.get("strict") in ("1", "true", "yes"):
         options["allow_partial"] = False
+    if params.get("minutes") in ("1", "true", "yes"):
+        options["minutes"] = True
+    elif params.get("minutes") in ("0", "false", "no"):
+        options["minutes"] = False
     options["stem"] = stem
     return options
+
+
+def _copy_unique(source: Path, folder: Path) -> Path:
+    """複製到工作目錄；同名時加序號（兩份文件都叫「會議紀錄.docx」很常見）。"""
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / source.name
+    n = 2
+    while target.exists():
+        target = folder / f"{source.stem}-{n}{source.suffix}"
+        n += 1
+    shutil.copy2(source, target)
+    return target
 
 
 def _find_output(out_dir: Path, stem: str, fmt: str) -> Path | None:
@@ -490,6 +619,7 @@ def _find_output(out_dir: Path, stem: str, fmt: str) -> Path | None:
         "md": [f"{stem}.transcript.md"], "json": [f"{stem}.transcript.json"],
         "txt": [f"{stem}.txt"], "srt": [f"{stem}.srt"], "vtt": [f"{stem}.vtt"],
         "summary.md": [f"{stem}.summary.md"], "summary.json": [f"{stem}.summary.json"],
+        "minutes.md": [f"{stem}.minutes.md"],
     }.get(fmt, [f"{stem}.{fmt}"])
     for name in candidates:
         path = out_dir / name
@@ -497,7 +627,8 @@ def _find_output(out_dir: Path, stem: str, fmt: str) -> Path | None:
             return path
     # 名稱可能因 slug 差異而不同 → 退而求其次比對後綴
     suffix = {"md": ".transcript.md", "json": ".transcript.json", "txt": ".txt", "srt": ".srt",
-              "vtt": ".vtt", "summary.md": ".summary.md", "summary.json": ".summary.json"}.get(fmt)
+              "vtt": ".vtt", "summary.md": ".summary.md", "summary.json": ".summary.json",
+              "minutes.md": ".minutes.md"}.get(fmt)
     if suffix:
         matches = sorted(out_dir.glob(f"*{suffix}"), key=lambda p: p.stat().st_mtime, reverse=True)
         if matches:
@@ -517,17 +648,23 @@ def _load_result(out_dir: Path, stem: str) -> dict[str, Any]:
         data = read_json(transcript_path)
         if isinstance(data, dict):
             segments = data.get("segments") or []
+            is_document = (data.get("meta") or {}).get("source_kind") == "document"
             text = "\n".join(
-                f"[{_clock(s.get('start', 0))}] {s.get('text', '')}" for s in segments
+                (f"[{i}] {s.get('text', '')}" if is_document else f"[{_clock(s.get('start', 0))}] {s.get('text', '')}")
+                for i, s in enumerate(segments, start=1)
             )
             result["transcript"] = {
-                "duration": data.get("duration"), "stats": data.get("stats"),
+                "duration": None if is_document else data.get("duration"), "stats": data.get("stats"),
+                "source_kind": (data.get("meta") or {}).get("source_kind"),
                 "segments": len(segments), "text": text[:MAX_INLINE_CHARS],
                 "truncated": len(text) > MAX_INLINE_CHARS,
             }
     md_path = _find_output(out_dir, stem, "summary.md")
     if md_path:
         result["summary_markdown"] = md_path.read_text(encoding="utf-8")[:MAX_INLINE_CHARS]
+    minutes_path = _find_output(out_dir, stem, "minutes.md")
+    if minutes_path:
+        result["minutes_markdown"] = minutes_path.read_text(encoding="utf-8")[:MAX_INLINE_CHARS]
     return result
 
 
@@ -565,7 +702,18 @@ def _config_summary(cfg: Config) -> dict[str, Any]:
         "limits": _limits_summary(cfg),
         "summarize": dataclasses.asdict(cfg.summarize),
         "work_dir": str(Path(cfg.work_dir).expanduser().resolve()),
+        "documents": {
+            "extensions": sorted(DOCUMENT_EXT),
+            "kinds": KIND_LABEL,
+            "pdf": _pdf_status(cfg.documents.markitdown_cmd),
+        },
     }
+
+
+@functools.lru_cache(maxsize=4)
+def _pdf_status(explicit: str | None) -> dict[str, Any]:
+    """markitdown 是否可用（會掃 conda 環境，結果快取：/api/jobs 輪詢時才不會一直掃磁碟）。"""
+    return markitdown_status(explicit)
 
 
 def _version() -> str:

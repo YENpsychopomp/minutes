@@ -20,8 +20,10 @@ from typing import Any, Callable, Sequence
 from .asr import ASRClient, ASRError, ASROutcome
 from .chunking import ChunkPlan, Plan, max_seconds_for_bytes, plan_chunks, split_chunk
 from .config import Config
+from .documents import Document, DocumentError, documents_to_transcript, is_document, load_document
 from .llm import LLMClient, LLMError
 from .media import Silence, describe, detect_silence, estimate_wav_bytes, extract_chunk, normalize_audio, probe
+from .minutes import ReferenceProfile, analyze_references, compose_minutes, local_profile
 from .summarizer import Chapter, Summarizer, Summary
 from .transcript import Segment, Transcript, merge_chunk_results, transcript_from_text
 from .util import LOG, atomic_write_text, fmt_bytes, fmt_clock, read_json, slugify, write_json
@@ -61,6 +63,12 @@ class JobOptions:
     concurrency: int | None = None
     title_hint: str | None = None
     verify_ssl: bool = True
+    #: 過往會議紀錄（範本）：沿用其格式、段落結構、用語、與會者與專有名詞
+    references: list[str] | None = None
+    #: 文件輸入時的其他文件（第一份是 run() 的 input_path）
+    extra_inputs: list[str] | None = None
+    #: 是否另外產出 minutes.md（None = 有範本或輸入是文件時自動產出）
+    minutes: bool | None = None
 
     def apply_to(self, cfg: Config) -> Config:
         """把 CLI/Web 選項蓋到設定複本上。
@@ -76,6 +84,7 @@ class JobOptions:
             chunking=dataclasses.replace(cfg.chunking),
             summarize=dataclasses.replace(cfg.summarize),
             output=dataclasses.replace(cfg.output),
+            documents=dataclasses.replace(cfg.documents),
         )
         if self.asr_language:
             out.asr.language = self.asr_language
@@ -236,6 +245,10 @@ def make_job_id(source: Path, cfg: Config, options: JobOptions) -> str:
     h.update(str(stat.st_size).encode())
     h.update(f"{cfg.chunking.target_seconds}:{cfg.chunking.overlap_seconds}:{cfg.audio.sample_rate}".encode())
     h.update(f"{cfg.asr.model}:{cfg.asr.language}".encode())
+    for extra in options.extra_inputs or []:  # 多份文件輸入：組合不同就是不同工作
+        path = Path(extra).expanduser()
+        h.update(str(path.resolve()).encode("utf-8"))
+        h.update(str(path.stat().st_size if path.is_file() else 0).encode())
     digest = h.hexdigest()[:10]
     return f"{slugify(source.stem, 40)}-{digest}"
 
@@ -260,6 +273,9 @@ class Pipeline:
         self.cancel = cancel or threading.Event()
         self.warnings: list[str] = []
         self.errors: list[dict] = []
+        self.references: list[Document] = []
+        self.profile: ReferenceProfile | None = None
+        self._work: Path | None = None
 
     # -- 目錄 ------------------------------------------------------------
     def _prepare_dirs(self, source: Path) -> tuple[Path, str]:
@@ -292,20 +308,33 @@ class Pipeline:
     def _run_with_store(self, source: Path, work: Path, job_id: str, store: JobStateStore, started: float) -> JobResult:
         out_dir = Path(self.options.out_dir or source.parent).expanduser()
         stem = self.cfg.output.stem or slugify(source.stem, 60) or "transcript"
-        store.update(stage="probe", progress=0.01, message="讀取媒體資訊", force=True)
-        info = probe(source, ffprobe_bin=self.cfg.ffprobe_bin)
-        duration = info.duration
-        if duration is None or duration <= 0:
-            store.update(message="來源未取得長度，先抽取音訊後再取長度")
-        store.update(counts={"audio_streams": len(info.audio_streams), "has_video": info.has_video}, force=True)
-        LOG.info("來源：%s", describe(info, self.cfg))
-
-        if self.options.skip_asr and self.options.transcript_input:
-            transcript = _load_transcript(Path(self.options.transcript_input), fallback_duration=duration or 0.0)
-            duration = transcript.duration or duration or 0.0
+        self._work = work
+        doc_input = is_document(source)
+        store.update(kind="document" if doc_input else "media", force=True)
+        # 範本先讀：PDF 缺 markitdown 之類的問題要在花 ASR 費用之前就報出來
+        if self.options.references:
+            self.references = self._load_documents(self.options.references, store, role="範本")
+            store.update(references=[d.name for d in self.references], force=True)
+        if doc_input:
+            transcript = self._document_transcript(source, store)
+            duration = transcript.duration
+            plan = Plan(duration=duration, chunks=[])
+            if transcript.meta.get("source_kind") == "document":
+                # 文件沒有時間軸：字幕檔只會是一串虛擬時間，不輸出
+                self.cfg.output.formats = [f for f in self.cfg.output.formats if f not in ("srt", "vtt")]
+        elif self.options.skip_asr and self.options.transcript_input:
+            info = probe(source, ffprobe_bin=self.cfg.ffprobe_bin)
+            transcript = _load_transcript(Path(self.options.transcript_input), fallback_duration=info.duration or 0.0)
+            duration = transcript.duration or info.duration or 0.0
             plan = Plan(duration=duration, chunks=[])
             store.update(stage="transcript", progress=0.5, message=f"使用既有逐字稿：{Path(self.options.transcript_input).name}", force=True)
         else:
+            store.update(stage="probe", progress=0.01, message="讀取媒體資訊", force=True)
+            info = probe(source, ffprobe_bin=self.cfg.ffprobe_bin)
+            if info.duration is None or info.duration <= 0:
+                store.update(message="來源未取得長度，先抽取音訊後再取長度")
+            store.update(counts={"audio_streams": len(info.audio_streams), "has_video": info.has_video}, force=True)
+            LOG.info("來源：%s", describe(info, self.cfg))
             transcript, plan, duration = self._transcribe(source, work, info, store)
 
         if self.options.dry_run:
@@ -317,8 +346,10 @@ class Pipeline:
         # ---- 摘要 ------------------------------------------------------
         summary: Summary | None = None
         if not self.options.skip_summary:
-            store.update(stage="summarize", progress=0.8, message="產生摘要", force=True)
-            summary = self._summarize(transcript, store, title_hint=self.options.title_hint or source.stem)
+            store.update(stage="reference" if self.references else "summarize",
+                         progress=0.15 if doc_input else 0.8, message="產生摘要", force=True)
+            summary = self._summarize(transcript, store, title_hint=self.options.title_hint or source.stem,
+                                      doc_input=doc_input, source=source)
             if summary is None:
                 summary = self._fallback_summary(transcript, self.options.title_hint or source.stem, reason="未取得摘要")
         else:
@@ -329,18 +360,24 @@ class Pipeline:
         outputs = write_outputs(
             out_dir=out_dir, stem=stem, transcript=transcript, summary=summary, cfg=self.cfg,
             source_name=source.name, job_id=job_id,
+            protect=[source, *(self.options.extra_inputs or []), *(self.options.references or [])],
         )
         elapsed = time.perf_counter() - started
         partial = bool(self.errors)
         status = "done" if not self.errors else ("partial" if self.options.allow_partial else "failed")
         stats = {
+            "input_kind": "document" if doc_input else "media",
             "chunks_total": plan.count,
             "chunks_ok": transcript.meta.get("chunks_ok"),
             "asr_seconds": _asr_seconds(work / "results"),
             "elapsed": round(elapsed, 2),
-            "realtime_factor": round(duration / elapsed, 2) if elapsed > 0 and duration else None,
+            "realtime_factor": round(duration / elapsed, 2) if elapsed > 0 and duration and not doc_input else None,
             "llm_usage": summary.meta.get("llm_usage") if summary else None,
         }
+        if doc_input:
+            stats["documents"] = len(transcript.meta.get("documents") or []) or 1
+        if self.references:
+            stats["references"] = [d.name for d in self.references]
         job_result = JobResult(
             job_id=job_id, work_dir=str(work), out_dir=str(out_dir), duration=duration,
             plan=plan.to_dict(), transcript=transcript, summary=summary, outputs=outputs,
@@ -621,23 +658,90 @@ class Pipeline:
         ]
         return segs, data.get("language")
 
+    # -- 文件輸入 --------------------------------------------------------
+    def _load_documents(self, paths: Sequence[str | Path], store: JobStateStore, *, role: str) -> list[Document]:
+        docs: list[Document] = []
+        dcfg = self.cfg.documents
+        for i, raw in enumerate(paths, start=1):
+            self._check_cancel()
+            path = Path(raw).expanduser()
+            store.update(message=f"讀取{role} {i}/{len(paths)}：{path.name}")
+            try:
+                doc = load_document(path, markitdown_cmd=dcfg.markitdown_cmd,
+                                    markitdown_timeout=dcfg.markitdown_timeout,
+                                    paragraph_max_chars=dcfg.paragraph_max_chars)
+            except DocumentError as exc:
+                raise JobError(f"{role}無法讀取：{exc}") from exc
+            self.warnings.extend(f"{doc.name}：{w}" for w in doc.warnings)
+            docs.append(doc)
+        return docs
+
+    def _document_transcript(self, source: Path, store: JobStateStore) -> Transcript:
+        paths = [source] + [Path(p) for p in (self.options.extra_inputs or [])]
+        store.update(stage="document", progress=0.03, message=f"讀取 {len(paths)} 份文件", force=True)
+        docs = self._load_documents(paths, store, role="文件")
+        transcript = documents_to_transcript(docs)
+        chars = sum(d.chars for d in docs)
+        store.update(stage="document", progress=0.1, force=True,
+                     message=f"已讀取 {len(docs)} 份文件，共 {len(transcript.segments)} 段、約 {chars} 字",
+                     counts={"documents": len(docs), "paragraphs": len(transcript.segments), "chars": chars})
+        LOG.info("文件輸入：%s（%d 段，約 %d 字）", "、".join(d.name for d in docs), len(transcript.segments), chars)
+        if self._work:
+            write_json(self._work / "transcript.json", transcript.to_dict())
+        return transcript
+
+    def _want_minutes(self, doc_input: bool) -> bool:
+        if self.options.minutes is not None:
+            return bool(self.options.minutes)
+        return bool(self.references) or doc_input
+
+    def _source_desc(self, transcript: Transcript, source: Path | None, doc_input: bool) -> str:
+        if doc_input:
+            names = [str(d.get("name")) for d in transcript.meta.get("documents") or [] if isinstance(d, dict)]
+            return "文件：" + "、".join(names or [source.name if source else "?"])
+        name = source.name if source else transcript.meta.get("source", "")
+        return f"影音「{name}」，長度 {fmt_clock(transcript.duration, force_hours=True)}"
+
     # -- 摘要 ------------------------------------------------------------
-    def _summarize(self, transcript: Transcript, store: JobStateStore, *, title_hint: str | None) -> Summary | None:
+    def _summarize(
+        self, transcript: Transcript, store: JobStateStore, *, title_hint: str | None,
+        doc_input: bool = False, source: Path | None = None,
+    ) -> Summary | None:
         cfg = self.cfg
+        want_minutes = self._want_minutes(doc_input)
+        lo, hi = (0.15, 0.86) if doc_input else (0.8, 0.93 if want_minutes else 0.97)
+        source_desc = self._source_desc(transcript, source, doc_input)
         try:
             cfg.require_api_key("llm")
             llm = LLMClient(cfg.llm, api_key=self._llm_key(), verify_ssl=self.options.verify_ssl)
         except Exception as exc:  # noqa: BLE001
             self.warnings.append(f"跳過摘要：{exc}")
             store.update(stage="summarize", message=f"跳過摘要（{exc}）→ 改用本地簡易摘要", force=True)
-            return self._fallback_summary(transcript, title_hint, reason=str(exc))
+            summary = self._fallback_summary(transcript, title_hint, reason=str(exc))
+            if self.references:
+                self.profile = local_profile(self.references)
+                summary.meta["reference"] = self.profile.to_dict()
+            if want_minutes:
+                self._attach_minutes(summary, None, store, progress=hi, source_desc=source_desc)
+            return summary
+
+        if self.references:
+            store.update(stage="reference", progress=lo, force=True,
+                         message=f"分析 {len(self.references)} 份過往會議紀錄的格式與用語")
+            self.profile = analyze_references(
+                self.references, llm=llm, cfg=cfg, cache_dir=self._work, warnings=self.warnings,
+            )
+            lo += 0.03
+        span = max(0.01, hi - lo)
         summarizer = Summarizer(
             llm, cfg.summarize, output_language=cfg.summarize.language,
             progress=lambda stage, frac, msg: store.update(
-                stage="summarize", progress=0.8 + 0.17 * min(1.0, float(frac)), message=msg
+                stage="summarize", progress=lo + span * min(1.0, float(frac)), message=msg
             ),
             cancel=self.cancel,
+            reference_hint=self.profile.hint_text() if self.profile else None,
         )
+        usable_llm: LLMClient | None = llm
         try:
             summary = summarizer.summarize(transcript, title_hint=title_hint)
         except KeyboardInterrupt:
@@ -646,14 +750,40 @@ class Pipeline:
             self.warnings.append(f"摘要失敗：{exc}")
             LOG.warning("摘要失敗，改用本地簡易摘要：%s", exc)
             store.update(stage="summarize", message=f"摘要失敗改用本地摘要（{exc}）", force=True)
-            return self._fallback_summary(transcript, title_hint, reason=str(exc))
+            summary, usable_llm = self._fallback_summary(transcript, title_hint, reason=str(exc)), None
         except Exception as exc:  # pragma: no cover - 防禦未知錯誤
             self.warnings.append(f"摘要失敗：{exc}")
             LOG.warning("摘要未知錯誤，改用本地簡易摘要：%s", exc)
             store.update(stage="summarize", message=f"摘要失敗改用本地摘要（{exc}）", force=True)
-            return self._fallback_summary(transcript, title_hint, reason=str(exc))
-        self.warnings.extend(summarizer.warnings)
+            summary, usable_llm = self._fallback_summary(transcript, title_hint, reason=str(exc)), None
+        else:
+            self.warnings.extend(summarizer.warnings)
+        if self.profile:
+            summary.meta["reference"] = self.profile.to_dict()
+        if want_minutes:
+            self._attach_minutes(summary, usable_llm, store, progress=hi + 0.005, source_desc=source_desc)
+            if usable_llm is not None:
+                summary.meta["llm_usage"] = usable_llm.usage.to_dict()  # 含範本分析與撰寫紀錄的呼叫
         return summary
+
+    def _attach_minutes(
+        self, summary: Summary, llm: LLMClient | None, store: JobStateStore, *, progress: float, source_desc: str,
+    ) -> None:
+        store.update(stage="minutes", progress=progress, force=True,
+                     message="依範本撰寫會議紀錄" if self.profile else "撰寫會議紀錄")
+        notes: list[str] = []
+        text, origin = compose_minutes(
+            summary, llm=llm, cfg=self.cfg, profile=self.profile, source_desc=source_desc, warnings=notes,
+        )
+        summary.minutes_markdown = text
+        summary.meta["minutes"] = {
+            "source": origin,
+            "format": "template" if self.profile else "default",
+            "template": list(self.profile.files) if self.profile else [],
+        }
+        if notes:
+            self.warnings.extend(notes)
+            summary.meta.setdefault("warnings", []).extend(notes)
 
     def _fallback_summary(self, transcript: Transcript, title_hint: str | None, *, reason: str) -> Summary:
         """LLM 無法使用時的粗略本地摘要：確保 summary.json/summary.md 仍可產出。"""
@@ -669,13 +799,17 @@ class Pipeline:
             for i in range(0, len(paras), step):
                 p = paras[i]
                 chapters.append(
-                    Chapter(start=p.start, end=p.end, title=f"第 {i//step + 1} 段", summary=p.text[:120])
+                    Chapter(start=p.start, end=p.end, title=f"第 {i//step + 1} 段", summary=p.text[:120],
+                            para_start=i + 1, para_end=min(len(paras), i + step))
                 )
         meta = {
             "mode": "fallback",
             "warnings": [f"LLM 不可用或失敗：{reason}"] + self.warnings,
             "fallback": True,
+            "input_kind": "document" if transcript.meta.get("source_kind") == "document" else "media",
         }
+        if meta["input_kind"] == "document":
+            meta["documents"] = list(transcript.meta.get("documents") or [])
         return Summary(
             title=title_hint or (transcript.meta.get("title") if isinstance(transcript.meta, dict) else None) or "影音摘要",
             tldr=tldr,
@@ -810,21 +944,29 @@ def _status_message(status: str, outputs: dict) -> str:
     return f"{status}：{files}"
 
 
+def _safe_target(path: Path, protect: set[Path]) -> Path:
+    """輸出檔若會蓋到輸入檔（例：輸入 notes.txt、輸出也叫 notes.txt），改名為 notes.out.txt。"""
+    if path.resolve() not in protect:
+        return path
+    return path.with_name(f"{path.stem}.out{path.suffix}")
+
+
 def write_outputs(
     *, out_dir: Path, stem: str, transcript: Transcript, summary: Summary | None, cfg: Config,
-    source_name: str | None = None, job_id: str | None = None,
+    source_name: str | None = None, job_id: str | None = None, protect: Sequence[str | Path] = (),
 ) -> dict[str, str]:
-    """依 ``output.formats`` 寫出檔案，回傳 {格式: 路徑}。"""
+    """依 ``output.formats`` 寫出檔案，回傳 {格式: 路徑}。``protect`` 是絕不覆寫的輸入檔。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     outputs: dict[str, str] = {}
     fmts = [f.lower() for f in (cfg.output.formats or [])]
     title = (summary.title if summary and summary.title else f"{source_name or stem} 逐字稿")
+    guard = {Path(x).expanduser().resolve() for x in protect}
     if "json" in fmts:
-        p = out_dir / f"{stem}.transcript.json"
+        p = _safe_target(out_dir / f"{stem}.transcript.json", guard)
         p.write_text(transcript.to_json(), encoding="utf-8")
         outputs["json"] = str(p)
     if "txt" in fmts:
-        p = out_dir / f"{stem}.txt"
+        p = _safe_target(out_dir / f"{stem}.txt", guard)
         p.write_text(
             transcript.to_text(
                 paragraph_gap=cfg.output.paragraph_gap, paragraph_max_chars=cfg.output.paragraph_max_chars
@@ -833,7 +975,7 @@ def write_outputs(
         )
         outputs["txt"] = str(p)
     if "md" in fmts:
-        p = out_dir / f"{stem}.transcript.md"
+        p = _safe_target(out_dir / f"{stem}.transcript.md", guard)
         p.write_text(
             transcript.to_markdown(
                 title=title, source=source_name, paragraph_gap=cfg.output.paragraph_gap,
@@ -843,20 +985,24 @@ def write_outputs(
         )
         outputs["md"] = str(p)
     if "srt" in fmts:
-        p = out_dir / f"{stem}.srt"
+        p = _safe_target(out_dir / f"{stem}.srt", guard)
         p.write_text(transcript.to_srt(), encoding="utf-8")
         outputs["srt"] = str(p)
     if "vtt" in fmts:
-        p = out_dir / f"{stem}.vtt"
+        p = _safe_target(out_dir / f"{stem}.vtt", guard)
         p.write_text(transcript.to_vtt(), encoding="utf-8")
         outputs["vtt"] = str(p)
     if summary is not None:
-        p = out_dir / f"{stem}.summary.md"
+        p = _safe_target(out_dir / f"{stem}.summary.md", guard)
         p.write_text(summary.to_markdown(duration=transcript.duration), encoding="utf-8")
         outputs["summary.md"] = str(p)
-        p = out_dir / f"{stem}.summary.json"
+        p = _safe_target(out_dir / f"{stem}.summary.json", guard)
         p.write_text(summary.to_json() + "\n", encoding="utf-8")
         outputs["summary.json"] = str(p)
+        if summary.minutes_markdown:
+            p = _safe_target(out_dir / f"{stem}.minutes.md", guard)
+            p.write_text(summary.minutes_markdown, encoding="utf-8")
+            outputs["minutes.md"] = str(p)
     if job_id:
         p = out_dir / f"{stem}.job.json"
         write_json(p, {"job_id": job_id, "outputs": outputs, "formats": fmts})

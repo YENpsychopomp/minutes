@@ -158,6 +158,25 @@ class OutputConfig:
 
 
 @dataclass
+class DocumentsConfig:
+    """文件輸入與「過往會議紀錄當範本」的設定。"""
+
+    #: PDF 轉文字用的 markitdown 指令（例：C:/Users/me/anaconda3/envs/markitdown/Scripts/markitdown.exe）。
+    #: 未設定時依序嘗試：同環境 import markitdown → PATH 上的 markitdown → conda 環境裡的 markitdown。
+    markitdown_cmd: str | None = None
+    #: markitdown 轉換逾時（秒）
+    markitdown_timeout: float = 300.0
+    #: 範本分析時最多送給模型的範本字數（多份範本合計）
+    reference_max_chars: int = 12000
+    #: 撰寫會議紀錄時附上的範本原文節錄字數（讓模型模仿版面與用語）
+    template_excerpt_chars: int = 4000
+    #: 單一文件段落過長時，依句子切成約這個字數的段落（段落編號是章節定位的錨點）
+    paragraph_max_chars: int = 500
+    #: 撰寫會議紀錄的輸出 tokens 上限（0 = 沿用 llm.max_output_tokens）
+    minutes_max_output_tokens: int = 0
+
+
+@dataclass
 class Config:
     asr: ASRConfig = field(default_factory=ASRConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -165,6 +184,7 @@ class Config:
     chunking: ChunkConfig = field(default_factory=ChunkConfig)
     summarize: SummarizeConfig = field(default_factory=SummarizeConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    documents: DocumentsConfig = field(default_factory=DocumentsConfig)
     #: 工作目錄（放中間檔與快取）
     work_dir: str = ".summery_work"
     #: ffmpeg / ffprobe
@@ -213,7 +233,7 @@ class ConfigError(RuntimeError):
 
 LOG = logging.getLogger("summery")
 
-_SECTIONS = ("asr", "llm", "audio", "chunking", "summarize", "output")
+_SECTIONS = ("asr", "llm", "audio", "chunking", "summarize", "output", "documents")
 
 _ALIASES: dict[tuple[str, str], str] = {
     ("asr", "base_url"): "OPENAI_BASE_URL",

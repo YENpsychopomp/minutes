@@ -1,4 +1,4 @@
-import { STAGES, type JobDetail } from "../types";
+import { stagesFor, type JobDetail } from "../types";
 import { IconCheck, IconClose, IconSpinner, IconStop } from "./Icons";
 
 interface Props {
@@ -8,6 +8,7 @@ interface Props {
 }
 
 export function ProgressCard({ job, onCancel, cancelling }: Props) {
+  const STAGES = stagesFor(job);
   const stageIndex = STAGES.findIndex((stage) => stage.key === job.stage);
   const failed = job.status === "failed";
   const percent = Math.max(3, Math.round((job.progress ?? 0) * 100));
@@ -52,6 +53,7 @@ export function ProgressCard({ job, onCancel, cancelling }: Props) {
             const state = failed && index === stageIndex ? "error" : stageIndex < 0 ? "done" : index < stageIndex ? "done" : index === stageIndex ? "active" : "todo";
             const isAsr = stage.key === "asr" && counts.total;
             const isSummary = stage.key === "summarize" && counts.summary_total;
+            const isDocs = stage.key === "document" && counts.documents;
             return (
               <li key={stage.key} className="stage" data-state={state}>
                 <span className="stage-mark" aria-hidden="true">
@@ -64,6 +66,7 @@ export function ProgressCard({ job, onCancel, cancelling }: Props) {
                 <span className="stage-note num">
                   {state === "active" && isAsr ? `${counts.done ?? 0} / ${counts.total} 塊` : null}
                   {state === "active" && isSummary ? `${counts.summary_done ?? 0} / ${counts.summary_total} 份筆記` : null}
+                  {isDocs ? `${counts.documents} 份・${counts.paragraphs ?? 0} 段` : null}
                 </span>
               </li>
             );

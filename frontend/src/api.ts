@@ -1,4 +1,4 @@
-import type { Job, JobDetail, JobOptionsInput, ServiceConfig } from "./types";
+import type { DocInfo, Job, JobDetail, JobOptionsInput, ServiceConfig } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -31,8 +31,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-export function optionParams(options: JobOptionsInput): URLSearchParams {
+export function optionParams(
+  options: JobOptionsInput,
+  docs: { inputs?: string[]; references?: string[] } = {},
+): URLSearchParams {
   const params = new URLSearchParams();
+  if (docs.inputs?.length) params.set("inputs", docs.inputs.join(","));
+  if (docs.references?.length) params.set("references", docs.references.join(","));
+  if (options.minutes) params.set("minutes", "1");
   if (options.style) params.set("style", options.style);
   if (options.summary_language) params.set("summary_language", options.summary_language);
   if (options.asr_language) params.set("asr_language", options.asr_language);
@@ -54,34 +60,46 @@ export const api = {
 
   cancel: (id: string) => request<JobDetail>(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
 
-  /** 上傳：檔案直接當 body（後端讀 Content-Length），檔名走 X-Filename 標頭。 */
-  upload: (file: File, options: JobOptionsInput, onProgress?: (fraction: number) => void) =>
-    new Promise<JobDetail>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `/api/jobs?${optionParams(options).toString()}`);
-      xhr.responseType = "text";
-      xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total);
-      };
-      xhr.onerror = () => reject(new ApiError("上傳中斷，請檢查網路或檔案大小後再試一次", 0));
-      xhr.onload = () => {
-        let data: unknown = null;
-        try {
-          data = JSON.parse(xhr.responseText || "null");
-        } catch {
-          data = null;
-        }
-        const holder = (data ?? {}) as { error?: string; detail?: string };
-        if (xhr.status < 200 || xhr.status >= 300) {
-          reject(new ApiError(holder.error ?? holder.detail ?? `上傳失敗（HTTP ${xhr.status}）`, xhr.status));
-          return;
-        }
-        resolve(data as JobDetail);
-      };
-      xhr.send(file);
-    }),
+  /** 上傳影音：檔案直接當 body（後端讀 Content-Length），檔名走 X-Filename 標頭；references 是範本文件 ID。 */
+  upload: (file: File, options: JobOptionsInput, onProgress?: (fraction: number) => void, references: string[] = []) =>
+    sendFile<JobDetail>(`/api/jobs?${optionParams(options, { references }).toString()}`, file, onProgress),
+
+  /** 暫存並立即解析一份文件（輸入或範本都走這裡），回傳文件 ID 與解析結果。 */
+  uploadDocument: (file: File, onProgress?: (fraction: number) => void) =>
+    sendFile<DocInfo>("/api/documents", file, onProgress),
+
+  /** 以已上傳的文件建立「從文件產出會議紀錄」的工作。 */
+  createDocumentJob: (inputs: string[], options: JobOptionsInput, references: string[] = []) =>
+    request<JobDetail>(`/api/jobs?${optionParams(options, { inputs, references }).toString()}`, { method: "POST" }),
 };
+
+function sendFile<T>(url: string, file: File, onProgress?: (fraction: number) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "text";
+    xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total);
+    };
+    xhr.onerror = () => reject(new ApiError("上傳中斷，請檢查網路或檔案大小後再試一次", 0));
+    xhr.onload = () => {
+      let data: unknown = null;
+      try {
+        data = JSON.parse(xhr.responseText || "null");
+      } catch {
+        data = null;
+      }
+      const holder = (data ?? {}) as { error?: string; detail?: string };
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(holder.error ?? holder.detail ?? `上傳失敗（HTTP ${xhr.status}）`, xhr.status));
+        return;
+      }
+      resolve(data as T);
+    };
+    xhr.send(file);
+  });
+}
 
 export const fileUrl = (jobId: string, name: string) =>
   `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`;

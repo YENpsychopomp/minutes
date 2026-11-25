@@ -21,7 +21,7 @@ def point_env(monkeypatch, url: str, tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ parser
-@pytest.mark.parametrize("command", ["run", "transcribe", "summarize", "plan", "probe", "serve",
+@pytest.mark.parametrize("command", ["run", "transcribe", "summarize", "minutes", "plan", "probe", "serve",
                                      "mock-server", "make-media", "jobs"])
 def test_subcommand_help_works(command):
     with pytest.raises(SystemExit) as exc:
@@ -220,3 +220,64 @@ def test_cli_plan_shows_chunk_budget(media_factory, tmp_path, clean_env, capsys)
     assert code == cli.EXIT_OK
     out = capsys.readouterr().out
     assert "切塊" in out and "chunk 檔" in out and "預估 ASR 請求" in out
+
+
+# ------------------------------------------------------------------ 文件與範本
+def test_cli_minutes_from_documents_with_template(tmp_path, monkeypatch, mock_server, make_docx, capsys):
+    point_env(monkeypatch, mock_server, tmp_path)
+    notes = tmp_path / "例會筆記.md"
+    notes.write_text("# 預算\n\n同意送簽採購案。\n", encoding="utf-8")
+    extra = tmp_path / "補充.txt"
+    extra.write_text("陳志強負責 11 月底前完成。\n", encoding="utf-8")
+    out = tmp_path / "out"
+    code = cli.main(["minutes", str(notes), str(extra), "--template", str(make_docx()),
+                     "--out-dir", str(out), "--quiet"])
+    assert code == cli.EXIT_OK, capsys.readouterr().err
+    names = sorted(p.name for p in out.iterdir())
+    assert "例會筆記.minutes.md" in names and "例會筆記.summary.md" in names
+    assert "例會筆記.transcript.md" in names and not any(n.endswith((".srt", ".vtt")) for n in names)
+    printed = capsys.readouterr().out
+    assert "輸入文件  : 2 份" in printed and "範本      : template.docx" in printed and "依範本格式" in printed
+
+
+def test_cli_minutes_rejects_media_and_missing_files(tmp_path, clean_env, capsys):
+    media = tmp_path / "a.mp4"
+    media.write_bytes(b"x")
+    assert cli.main(["minutes", str(media)]) == cli.EXIT_ERROR
+    assert "summery run" in capsys.readouterr().err
+    assert cli.main(["minutes", str(tmp_path / "nope.docx")]) == cli.EXIT_ERROR
+
+
+def test_cli_summarize_with_template_writes_minutes(tmp_path, monkeypatch, mock_server, make_docx, capsys):
+    point_env(monkeypatch, mock_server, tmp_path)
+    transcript = tmp_path / "talk.transcript.json"
+    transcript.write_text(json.dumps({
+        "schema": "summery.transcript/1", "duration": 120, "language": "zh", "meta": {},
+        "segments": [{"start": i * 10, "end": i * 10 + 9, "text": f"第 {i} 段會議內容。"} for i in range(8)],
+    }, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    code = cli.main(["summarize", str(transcript), "--template", str(make_docx()), "--out-dir", str(out), "--quiet"])
+    assert code == cli.EXIT_OK
+    assert sorted(p.name for p in out.iterdir()) == ["talk.minutes.md", "talk.summary.json", "talk.summary.md"]
+    summary = json.loads((out / "talk.summary.json").read_text(encoding="utf-8"))
+    assert summary["meta"]["minutes"]["format"] == "template" and summary["meta"]["input_kind"] == "media"
+
+
+def test_cli_summarize_reads_docx(tmp_path, monkeypatch, mock_server, make_docx, capsys):
+    point_env(monkeypatch, mock_server, tmp_path)
+    out = tmp_path / "out"
+    assert cli.main(["summarize", str(make_docx("old.docx")), "--out-dir", str(out), "--quiet"]) == cli.EXIT_OK
+    summary = json.loads((out / "old.summary.json").read_text(encoding="utf-8"))
+    assert summary["meta"]["input_kind"] == "document"
+    assert (out / "old.minutes.md").is_file()  # 輸入是文件：跟 run／minutes 一樣自動產出會議紀錄
+    other = tmp_path / "out2"
+    assert cli.main(["summarize", str(make_docx("old.docx")), "--no-minutes", "--out-dir", str(other), "--quiet"]) == cli.EXIT_OK
+    assert not (other / "old.minutes.md").exists()
+
+
+def test_cli_run_accepts_a_document(tmp_path, monkeypatch, mock_server, capsys):
+    point_env(monkeypatch, mock_server, tmp_path)
+    notes = tmp_path / "notes.md"
+    notes.write_text("# 決議\n\n通過。\n", encoding="utf-8")
+    assert cli.main(["run", str(notes), "--out-dir", str(tmp_path / "o"), "--quiet"]) == cli.EXIT_OK
+    assert (tmp_path / "o" / "notes.minutes.md").is_file()

@@ -146,17 +146,26 @@ class Transcript:
         source: str | None = None,
     ) -> str:
         lines = [f"# {title}", ""]
-        info = [f"- 長度：{fmt_clock(self.duration, force_hours=True)}"]
+        is_document = self.meta.get("source_kind") == "document"
+        if is_document:
+            # 文件輸入沒有時間軸：以段落編號標示（與摘要章節的「段落 a–b」對應）
+            names = [str(d.get("name")) for d in self.meta.get("documents") or [] if isinstance(d, dict)]
+            info = [f"- 來源文件：{'、'.join(names) or source or '?'}"]
+        else:
+            info = [f"- 長度：{fmt_clock(self.duration, force_hours=True)}"]
         if self.language:
             info.append(f"- 語言：{self.language}")
-        if source:
+        if source and not is_document:
             info.append(f"- 來源：`{source}`")
         chunks = self.meta.get("chunks")
         if chunks:
             info.append(f"- ASR 分塊：{chunks} 塊（模型：{self.meta.get('asr_model', '?')}）")
         lines += info + ["", "## 全文", ""]
-        for p in self.paragraphs(paragraph_gap, paragraph_max_chars):
-            prefix = f"`[{fmt_clock(p.start, force_hours=True)}]` " if timestamps else ""
+        for number, p in enumerate(self.paragraphs(paragraph_gap, paragraph_max_chars), start=1):
+            if is_document:
+                prefix = f"`[{number}]` "
+            else:
+                prefix = f"`[{fmt_clock(p.start, force_hours=True)}]` " if timestamps else ""
             lines.append(f"{prefix}{p.text}")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"

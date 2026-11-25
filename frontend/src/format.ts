@@ -68,6 +68,7 @@ export const FORMAT_LABEL: Record<string, string> = {
   txt: "純文字",
   srt: "字幕 SRT",
   vtt: "字幕 VTT",
+  "minutes.md": "會議紀錄 Markdown",
   "summary.md": "摘要 Markdown",
   "summary.json": "摘要 JSON",
   "job.json": "工作紀錄",
@@ -79,4 +80,10 @@ export function humanSeconds(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)} 秒`;
   const minutes = seconds / 60;
   return Number.isInteger(minutes) ? `${minutes} 分鐘` : `${minutes.toFixed(1)} 分鐘`;
+}
+
+/** 文件工作的「逐字稿」其實是上傳文件的原文。 */
+export function formatLabel(format: string, isDocument: boolean): string {
+  const label = FORMAT_LABEL[format] ?? format;
+  return isDocument ? label.replace("逐字稿", "原文") : label;
 }

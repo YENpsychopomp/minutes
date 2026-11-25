@@ -20,13 +20,16 @@ function TimeChip({ seconds, label, onSeek }: { seconds: number; label?: string;
 
 export function SummaryDoc({ summary, duration, onSeek }: Props) {
   const meta = summary.meta ?? {};
+  const isDocument = meta.input_kind === "document";
   const chips: string[] = [];
-  if (duration) chips.push(`長度 ${clock(duration)}`);
-  if (meta.paragraphs) chips.push(`${meta.paragraphs} 段逐字稿`);
+  if (isDocument && meta.documents?.length) chips.push(`${meta.documents.length} 份文件`);
+  if (duration && !isDocument) chips.push(`長度 ${clock(duration)}`);
+  if (meta.paragraphs) chips.push(isDocument ? `${meta.paragraphs} 段原文` : `${meta.paragraphs} 段逐字稿`);
   if (meta.chars) chips.push(`${meta.chars.toLocaleString("zh-TW")} 字`);
   if (meta.mode === "map-reduce") chips.push(`分層摘要 ${meta.map_blocks ?? "?"} 區塊`);
   if (meta.llm_usage?.total_tokens) chips.push(`${meta.llm_usage.total_tokens.toLocaleString("zh-TW")} tokens`);
   if (meta.language) chips.push(String(meta.language));
+  if (meta.reference?.files?.length) chips.push(`參考範本：${meta.reference.files.join("、")}`);
 
   const warnings = (meta.warnings ?? []) as string[];
 
@@ -76,7 +79,7 @@ export function SummaryDoc({ summary, duration, onSeek }: Props) {
               <div className="chapter-head">
                 <TimeChip seconds={chapter.start} label={chapter.clock} onSeek={onSeek} />
                 <h4>{chapter.title}</h4>
-                {chapter.end > chapter.start ? (
+                {chapter.end > chapter.start && !isDocument ? (
                   <span className="chip num" style={{ marginLeft: "auto" }}>
                     {clock(chapter.end - chapter.start)}
                   </span>
@@ -197,8 +200,9 @@ export function SummaryDoc({ summary, duration, onSeek }: Props) {
         <p className="notice notice-warn" style={{ marginTop: 22 }}>
           <IconClock size={18} />
           <span>
-            這個工作只有逐字稿，沒有摘要內容（可能是選擇了「只做逐字稿」，或下游模型當時沒有回傳可用內容）。
-            切到「逐字稿」分頁仍可閱讀與下載全文。
+            {isDocument
+              ? "這個工作沒有摘要內容（下游模型當時沒有回傳可用內容）。切到「原文」分頁仍可閱讀上傳文件的全文。"
+              : "這個工作只有逐字稿，沒有摘要內容（可能是選擇了「只做逐字稿」，或下游模型當時沒有回傳可用內容）。切到「逐字稿」分頁仍可閱讀與下載全文。"}
           </span>
         </p>
       ) : null}

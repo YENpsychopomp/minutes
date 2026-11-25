@@ -20,6 +20,9 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
   const [segments, setSegments] = useState<Segment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // 文件輸入沒有時間軸：改以段落編號標示（與摘要章節的「段落 a–b」對應）
+  const [isDocument, setIsDocument] = useState(job.result?.transcript?.source_kind === "document");
+  const noun = isDocument ? "原文" : "逐字稿";
 
   const file = useMemo(() => {
     const json = job.files?.find((f) => f.format === "json") ?? job.files?.find((f) => f.name.endsWith(".json"));
@@ -30,6 +33,16 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
     let cancelled = false;
     if (!file) {
       const inline = job.result?.transcript?.text ?? "";
+      if (job.result?.transcript?.source_kind === "document") {
+        setSegments(
+          inline
+            .split("\n")
+            .map((line) => line.match(/^\[(\d+)\]\s*(.*)$/))
+            .filter((m): m is RegExpMatchArray => Boolean(m))
+            .map((m) => ({ start: Number(m[1]), end: Number(m[1]), text: m[2] ?? "" })),
+        );
+        return;
+      }
       const parsed = inline
         .split("\n")
         .map((line) => line.match(/^\[(\d+):(\d+)(?::(\d+))?\]\s*(.*)$/))
@@ -46,14 +59,15 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
     fetchText(file)
       .then((text) => {
         if (cancelled) return;
-        const data = JSON.parse(text) as { segments?: Segment[] };
+        const data = JSON.parse(text) as { segments?: Segment[]; meta?: { source_kind?: string } };
+        setIsDocument(data.meta?.source_kind === "document");
         setSegments(Array.isArray(data.segments) ? data.segments : []);
       })
       .catch((exc: Error) => !cancelled && setError(exc.message));
     return () => {
       cancelled = true;
     };
-  }, [file, job.result?.transcript?.text]);
+  }, [file, job.result?.transcript?.text, job.result?.transcript?.source_kind]);
 
   const filtered = useMemo(() => {
     const list = segments ?? [];
@@ -74,7 +88,9 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
   if (error) {
     return (
       <p className="notice notice-error" role="alert">
-        <span>讀取逐字稿失敗：{error}</span>
+        <span>
+          讀取{noun}失敗：{error}
+        </span>
       </p>
     );
   }
@@ -85,13 +101,13 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
         {[92, 76, 88, 64, 84].map((w, i) => (
           <div className="skeleton" key={i} style={{ width: `${w}%` }} />
         ))}
-        <span className="sr-only">載入逐字稿中</span>
+        <span className="sr-only">載入{noun}中</span>
       </div>
     );
   }
 
   if (!segments.length) {
-    return <p className="empty">這個工作還沒有逐字稿。</p>;
+    return <p className="empty">這個工作還沒有{noun}。</p>;
   }
 
   return (
@@ -99,12 +115,12 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
       <div className="transcript-toolbar">
         <div className="field" style={{ flex: 1, minWidth: 200 }}>
           <label className="sr-only" htmlFor="find">
-            在逐字稿中搜尋
+            在{noun}中搜尋
           </label>
           <input
             id="find"
             type="search"
-            placeholder="搜尋逐字稿內容…"
+            placeholder={`搜尋${noun}內容…`}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -112,7 +128,7 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
         <span className="chip num">
           {filtered.length} / {segments.length} 段
         </span>
-        {onSeek ? <span className="chip">點時間即可跳到播放位置</span> : null}
+        {onSeek && !isDocument ? <span className="chip">點時間即可跳到播放位置</span> : null}
       </div>
 
       {filtered.length === 0 ? <p className="empty">找不到「{query}」</p> : null}
@@ -123,7 +139,9 @@ export function TranscriptPanel({ job, activeTime, onSeek }: Props) {
           return (
             <li className={`line${originalIndex === activeIndex ? " is-active" : ""}`} key={`${segment.start}-${i}`}>
               <div className="line-time num">
-                {onSeek ? (
+                {isDocument ? (
+                  `§${originalIndex + 1}`
+                ) : onSeek ? (
                   <button type="button" className="btn btn-ghost" style={{ padding: 0, minHeight: 0 }} onClick={() => onSeek(segment.start)}>
                     {clock(segment.start)}
                   </button>

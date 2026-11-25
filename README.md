@@ -5,6 +5,8 @@ ASR 與 LLM 走 **OpenAI 相容 API**（可自行指定 `base_url`），並為**
 
 * 執行期**零第三方依賴**：只要 Python 3.11+ 與 `ffmpeg`／`ffprobe`。
 * 輸出：Markdown、JSON、純文字、SRT、VTT 逐字稿 + 帶時間戳的章節摘要。
+* **會議紀錄**：手上只有筆記或逐字稿（Word、PDF、Markdown、純文字、字幕）也能直接產出會議紀錄；
+  再放一份**過往的會議紀錄當範本**，新紀錄會沿用它的格式、段落結構、用語、與會者與專有名詞。
 * 介面：命令列為主（可腳本化），另附 Vite 網頁介面（拖放上傳、播放列、可點擊時間戳）。
 
 ---
@@ -14,6 +16,7 @@ ASR 與 LLM 走 **OpenAI 相容 API**（可自行指定 `base_url`），並為**
 - [安裝](#安裝)
 - [快速開始](#快速開始)
 - [長影音是怎麼處理的](#長影音是怎麼處理的)
+- [會議紀錄：文件輸入與過往紀錄範本](#會議紀錄文件輸入與過往紀錄範本)
 - [命令一覽](#命令一覽)
 - [輸出檔案](#輸出檔案)
 - [設定](#設定)
@@ -203,13 +206,68 @@ summery run demo.mkv --chunk-seconds 300 --out-dir out
 
 ---
 
+## 會議紀錄：文件輸入與過往紀錄範本
+
+兩種用法可以各自使用，也可以一起用：
+
+| 用法 | 指令 | 產出 |
+|---|---|---|
+| **文件當輸入**：沒有錄音，只有筆記、逐字稿或舊紀錄 | `summery minutes 筆記.docx 補充.md` | 會議紀錄（標準格式）＋摘要＋原文 |
+| **過往紀錄當範本**：影音照常轉錄，紀錄沿用以前的格式 | `summery run 例會.mp4 --template 上次紀錄.docx` | 逐字稿＋摘要＋**依範本格式**的會議紀錄 |
+| 兩者一起 | `summery minutes 筆記.md --template 上次紀錄.pdf` | 依範本格式的會議紀錄 |
+
+```bash
+# 幾個人的筆記合成一份紀錄，沿用上次的格式（--template 可重複）
+summery minutes 王的筆記.docx 李的筆記.md --template 第11次系務會議紀錄.docx -o out
+
+# 影音 + 範本；沒有範本也想要一份正式紀錄就加 --minutes
+summery run 例會.mp4 --template 上次紀錄.pdf
+summery run 例會.mp4 --minutes
+
+# 既有逐字稿重算摘要時也能套範本
+summery summarize out/例會.transcript.json --template 上次紀錄.docx
+```
+
+**支援的文件格式**
+
+| 格式 | 怎麼讀 |
+|---|---|
+| `.docx` | 標準函式庫 `zipfile` + `xml` 解析：保留標題層級、Word 自動編號（「一、」「(一)」「1.」照原樣還原）、清單與表格。舊版 `.doc` 請先另存成 `.docx` |
+| `.md`／`.txt` | 直接讀；編碼自動判斷 UTF-8（含 BOM）／UTF-16／Big5（cp950）／GB18030 |
+| `.pdf` | 交給 Microsoft 開源的 [markitdown](https://github.com/microsoft/markitdown)（見下方） |
+| `.srt`／`.vtt` | 字幕：保留真實時間軸，章節照樣附時間 |
+| `.json` | summery 的 `transcript.json`（有時間軸）或 `summary.json` |
+
+**PDF 與 markitdown**：summery 本身仍是零依賴，PDF 才需要 markitdown，依序尋找：
+
+1. 設定 `documents.markitdown_cmd`（或環境變數 `SUMMERY_DOCUMENTS_MARKITDOWN_CMD`）；可以是路徑，也可以是整串指令，例如 `conda run -n markitdown markitdown`
+2. 同一個 Python 環境已 `pip install "markitdown[pdf]"` → 直接 import
+3. PATH 上的 `markitdown`
+4. conda 環境裡的 `markitdown`（自動掃 `anaconda3`／`miniconda3`／`miniforge3` 的 `envs/*/Scripts`，名稱含 markitdown 的環境優先；**不必先 `conda activate`**）
+
+都找不到時會明確說明怎麼裝、或改存 `.docx`／`.txt`。掃描影像的 PDF 沒有文字層，會提示先做 OCR。
+不少中文 PDF 會把「工、月、大、一」抽成外觀相同的康熙部首碼位（`⼯ ⽉ ⼤ ⼀`），summery 會自動換回一般漢字，人名與「一、」編號才比對得到（全形標點不受影響）。
+
+**範本怎麼被使用**
+
+1. **範本分析**（1 次 LLM 呼叫）：從過往紀錄抽出段落結構（`outline`）、開頭欄位（時間、地點、主席…）、與會者、專有名詞與版面語氣。結果依內容雜湊快取在工作目錄，同一份範本不會重複分析；模型不可用時改用標題規則推得段落結構。
+2. **摘要時校正用語**：與會者與專有名詞會附在 map／reduce／final 每個階段的提示詞裡，逐字稿裡聽錯的人名、單位名稱以範本寫法為準。
+3. **撰寫會議紀錄**（1 次 LLM 呼叫）：把結構化摘要依範本的段落順序、編號方式與語氣寫成 `<stem>.minutes.md`。範本裡的**舊日期、舊決議、舊待辦一律不會被沿用**；範本有但本次沒有資訊的欄位寫「（未提及）」。沒有範本時用標準會議紀錄格式（會議資訊／討論事項／決議／待辦表格／待釐清問題）。
+
+文件沒有時間軸，所以文件工作的章節、待釐清問題都以**段落編號**標示（`段落 3–7`），對應 `transcript.md` 裡的 `[3]`；
+也不會輸出 `.srt`／`.vtt`。輸入檔絕不會被覆寫：例如輸入 `notes.txt`、輸出目錄又是同一處時，純文字輸出會改名為 `notes.out.txt`。
+範本讀不到（例如舊版 `.doc`）時，工作會在送出 ASR **之前**就失敗，不浪費轉錄費用。
+
+---
+
 ## 命令一覽
 
 | 命令 | 用途 |
 |---|---|
-| `summery run <media>` | 完整流程：轉錄 + 摘要 |
+| `summery run <media>` | 完整流程：轉錄 + 摘要（加 `--template 舊紀錄.docx` 另出依範本格式的會議紀錄） |
+| `summery minutes <文件…>` | 從一或多份文件（docx／md／txt／pdf／srt／vtt／json）產出會議紀錄，不經 ASR |
 | `summery transcribe <media>` | 只要逐字稿（等同 `run --no-summary`） |
-| `summery summarize <transcript.json>` | 從既有逐字稿重算摘要（不再打 ASR，換風格/換模型很快） |
+| `summery summarize <transcript.json>` | 從既有逐字稿重算摘要（不再打 ASR，換風格/換模型很快）；也吃 docx／md／pdf／srt／vtt |
 | `summery plan <media>` | 只顯示切塊計畫與預估流量，**不打 API** |
 | `summery probe <media>` | 顯示媒體資訊（`--json` 給腳本） |
 | `summery jobs` | 列出已知工作與進度 |
@@ -227,6 +285,14 @@ summery run 會議.mp3 \
   --formats md,srt --out-dir out \                       # 輸出
   --no-resume --strict --dry-run \                       # 快取／嚴格模式／預演
   --json                                                 # 結尾輸出 JSON（給 CI 用）
+```
+
+會議紀錄相關選項（`run`／`minutes`／`summarize` 皆可用）：
+
+```bash
+--template 上次紀錄.docx   # 過往會議紀錄當範本，可重複
+--minutes                  # 一定輸出 minutes.md（沒有範本就用標準格式）
+--no-minutes               # 不要 minutes.md（預設：有範本或輸入是文件時才輸出）
 ```
 
 任何設定欄位都能用 `--set` 覆蓋：
@@ -248,8 +314,15 @@ summery plan 講座.mp4 --set chunking.silence_snap_window=600 --set llm.model=g
 | `<stem>.txt` | 純文字逐字稿 |
 | `<stem>.srt` / `<stem>.vtt` | 字幕檔 |
 | `<stem>.summary.md` | TL;DR、內容概要、關鍵重點、**章節摘要（含時間）**、關鍵字、決議、待辦（負責人/期限）、**待釐清問題（含時間點）**、金句 |
-| `<stem>.summary.json` | `summery.summary/1`：同上結構化版本，章節另附 `clock`；`open_questions[]` 為物件（`text`/`para`/`start`/`clock`/`located`） |
+| `<stem>.summary.json` | `summery.summary/1`：同上結構化版本，章節另附 `clock`；`open_questions[]` 為物件（`text`/`para`/`start`/`clock`/`located`）；另有 `minutes_markdown` |
+| `<stem>.minutes.md` | **會議紀錄**：有範本時依範本的段落結構與用語撰寫，沒有範本時用標準格式（文件輸入、`--template` 或 `--minutes` 時產出） |
 | `<stem>.job.json` | job_id、輸出對照表、使用格式 |
+
+文件輸入時，`transcript.*` 是上傳文件的原文（以 `[段落編號]` 標示，不輸出 srt／vtt）。
+`summary.json` 的 `meta` 會多幾個欄位：`input_kind`（`media`／`document`）、`documents`（輸入文件清單）、
+`reference`（範本分析結果：`outline`／`header_fields`／`attendees`／`terms`／`source`）、
+`minutes`（`format`：`template`／`default`；`source`：`model`／`local`；`template`：範本檔名）。
+文件工作的章節 `clock` 是「段落 a–b」而不是時間。
 
 摘要 JSON 的章節欄位範例：
 
@@ -308,6 +381,16 @@ export SUMMERY_CONFIG=./my.toml        # 不想每次都打 -c
 | `asr.max_upload_bytes` | 24 MiB | Gateway 有較小上限時調降，超出會自動二分 |
 | `summarize.max_input_tokens` | 12000 | 依摘要模型上下文窗口調整；越小越早進入 map-reduce |
 | `summarize.map_chunk_tokens` | 7000 | 摘要太空洞→調小（筆記更細）；費用太高→調大 |
+
+### 文件與範本欄位（`[documents]`）
+
+| 欄位 | 預設 | 什麼時候調 |
+|---|---|---|
+| `documents.markitdown_cmd` | 自動尋找 | PDF 讀不到、或想指定某個 markitdown（路徑或整串指令） |
+| `documents.reference_max_chars` | 12000 | 範本很長（多份合計）時，範本分析最多送這麼多字 |
+| `documents.template_excerpt_chars` | 4000 | 撰寫紀錄時附上的範本原文節錄；版面模仿得不夠像就調大 |
+| `documents.paragraph_max_chars` | 500 | 文件段落過長時依句子切小，章節定位更細 |
+| `documents.minutes_max_output_tokens` | 0 | 紀錄很長被截斷時調大（0 = 沿用 `llm.max_output_tokens`） |
 
 ---
 
@@ -407,7 +490,9 @@ summery serve --port 8765 --jobs-dir summery_jobs --max-upload-mb 4096
 | `GET /` | 前端頁面（未知路徑一律回前端外殼，重新整理深連結不會 404） |
 | `GET /assets/*` | Vite 產出的檔（附 `immutable` 快取標頭） |
 | `GET /api/health` `GET /api/config` `GET /api/jobs` | 狀態、可用模型與樣式、工作列表 |
-| `POST /api/jobs` | 上傳（位元組直接送 body，檔名放 `X-Filename`，不受表單上限限制） |
+| `POST /api/jobs` | 上傳（位元組直接送 body，檔名放 `X-Filename`，不受表單上限限制）；body 也可以是一份文件 |
+| `POST /api/documents` | 暫存一份文件並**立即解析**（同樣 body＋`X-Filename`），回傳 `doc_id`、類型、段落數、字數與預覽；讀不到（例如 PDF 缺 markitdown、掃描檔）回 422 |
+| `POST /api/jobs?inputs=<id,id>&references=<id>` | 以已上傳的文件建立會議紀錄工作（body 可為空）；影音上傳也能加 `references=` 套用範本，`minutes=1` 強制輸出會議紀錄 |
 | `GET /api/jobs/{id}`、`POST .../cancel` | 進度與結果 |
 | `GET /api/jobs/{id}/media` | 原始音訊，支援 `Range` 請求 → 播放器可以直接拖曳跳轉 |
 | `GET /files/{id}/{name}` | 各格式輸出下載 |
@@ -415,7 +500,8 @@ summery serve --port 8765 --jobs-dir summery_jobs --max-upload-mb 4096
 操作亮點：
 
 * 拖放上傳，即時顯示切塊數、已完成 chunk、當前台階（探測 → 轉碼 → 靜音偵測 → 排程 → 轉錄 → 摘要 → 寫檔）。
-* 三個分頁：摘要 / 逐字稿 / 原始 JSON；逐字稿可搜尋，**點任何時間戳會跳播放器對應位置**。
+* 放置區同時接受影音與文件：放文件（可多份）就是「從文件產出會議紀錄」；另有「過往會議紀錄（範本）」欄位，選了就先上傳解析，讀不到當場顯示原因。
+* 分頁：會議紀錄（有的話）/ 摘要 / 逐字稿（文件工作稱「原文」）/ 原始 JSON；會議紀錄可一鍵複製 Markdown 或下載；逐字稿可搜尋，**點任何時間戳會跳播放器對應位置**。
 * 摘要含章節大綱，章節時間一樣可點擊跳轉。
 * 上傳當下可調：摘要風格、摘要語言、ASR 語言、切塊長度、併行數、是否做章節。
 * 結果頁可用 `#/job/<工作編號>` 深連結分享；支援取消與歷史工作（服務重啟後仍可查看與下載）。
@@ -504,7 +590,7 @@ plan.json  state.json  job.json     切塊計畫、進度、中繼資料
 
 ```bash
 pip install -e ".[dev]"
-python3 -m pytest -q              # 142 個測試，含端到端（用內建 mock，免聯外網）
+python3 -m pytest -q              # 200 多個測試，含端到端（用內建 mock，免聯外網）
 python3 -m pytest tests/test_pipeline.py -k resume -q
 python3 -m pytest tests/test_deploy_script.py -q     # 一鍵部署／關終端即停止
 ```
@@ -512,7 +598,8 @@ python3 -m pytest tests/test_deploy_script.py -q     # 一鍵部署／關終端�
 測試涵蓋：切塊邊界與覆蓋率、跨塊時間戳合併與去重、HTTP 重試/429/`response_format` 降級、
 map-reduce 觸發與章節時間接地、resume 快取命中、部分失敗與 strict、自適應二分、CLI 各子命令、
 Web API 上傳/輪詢/下載/路徑穿越防護、靜態外殼與深連結回退、音訊 `Range` 串流（206/416）、
-部署腳本的前臺執行與 SIGHUP 清理。
+部署腳本的前臺執行與 SIGHUP 清理、文件解析（docx 標題／自動編號／表格、編碼判斷、字幕、PDF 經 markitdown、
+康熙部首正規化）、範本分析快取與保底、依範本撰寫紀錄、文件／範本的 CLI 與 Web 端到端。
 前端另有 `frontend/scripts/ui-check.mjs`（渲染級檢查，見「前端開發」）。
 
 原始碼結構：
@@ -525,8 +612,10 @@ src/summery/
   asr.py           OpenAI 相容 /audio/transcriptions
   transcript.py    解析、跨塊合併、段落化、五種輸出
   llm.py           /chat/completions、JSON 模式降級、token 統計
-  prompts.py       繁中提示詞（map / reduce / final）
+  prompts.py       繁中提示詞（map / reduce / final / 範本分析 / 會議紀錄）
   summarizer.py    直路 vs map-reduce、章節接地、降級彙整
+  documents.py     文件輸入：docx（zipfile+xml）、md/txt、srt/vtt、json、PDF（markitdown）
+  minutes.py       過往紀錄範本分析、依範本撰寫會議紀錄（含不靠模型的保底）
   pipeline.py      工作編排、state.json、resume、部分失敗
   web.py           API + 靜態服務（Range 串流、SPA 回退）
   web_static/      內建陽春介面（沒有 frontend/dist 時使用）
@@ -534,7 +623,7 @@ src/summery/
 
 frontend/                       Vite + React 前端
   src/App.tsx                   主狀態機（上傳、輪詢、深連結、通知）
-  src/components/               上傳卡、進度、摘要文件、逐字稿、播放器、側欄
+  src/components/               上傳卡、進度、摘要文件、會議紀錄（MarkdownView）、逐字稿、播放器、側欄
   src/styles.css                設計系統（紙感配色、字型、陰影、響應式）
   scripts/ui-check.mjs          渲染級品質檢查（需本機 Chrome）
 deploy.sh                       一鍵啟動／關閉終端即停止
@@ -549,3 +638,6 @@ deploy.ps1 / deploy.cmd         Windows 版一鍵啟動（PowerShell／雙擊）
 * 逐字稿時間戳精度來自 ASR；端點若不回傳 `verbose_json`，時間會以字數平均分攤。
 * 摘要品質取決於模型；系統負責「時間正確、不漏段、不長出原文沒有的章節時間」，不保證內容判斷正確。
 * 上傳與轉錄過程的中間檔會留在 `work_dir`/`jobs_dir`，涉及個資的媒體請自行管理保存與清除。
+* PDF 需要 markitdown（另外安裝）；掃描影像的 PDF 沒有文字層，需先 OCR。舊版 `.doc`、`.odt`、`.pages` 請先另存成 `.docx`。
+* `.docx` 解析涵蓋本文的段落、標題、自動編號、清單與表格；頁首頁尾、註腳、文字方塊內的版面不會保留。
+* 網頁上暫存的文件放在 `jobs_dir/_documents/`，不會自動清除。

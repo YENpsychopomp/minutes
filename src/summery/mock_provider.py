@@ -36,6 +36,8 @@ _FILLERS = [
 _MAP_MARKERS = ("結構化筆記", "區塊筆記", "影音內容分析助手")
 _REDUCE_MARKERS = ("彙整助手", "多份區塊筆記")
 _FINAL_MARKERS = ("資深影音內容編輯",)
+_REFERENCE_MARKERS = ("會議紀錄格式分析助手",)
+_MINUTES_MARKERS = ("會議紀錄撰寫人員",)
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +137,64 @@ def _note_indices(text: str) -> list[int]:
     return [int(m) for m in re.findall(r"\[筆記 (\d+)", text)]
 
 
+_OUTLINE_RE = re.compile(r"^\s*(#{1,4}\s+.+|[一二三四五六七八九十]+、.+|[壹貳參肆伍陸柒捌玖拾]+、.+)$", re.M)
+_FIELD_RE = re.compile(r"^\s*([^\s：:|#]{2,6})[：:]", re.M)
+
+
+def _mock_reference(user: str) -> dict[str, Any]:
+    """範本分析：照抄範本的段落標題順序與開頭欄位名稱（確定性，方便驗證）。"""
+    outline: list[str] = []
+    for match in _OUTLINE_RE.finditer(user):
+        title = match.group(1).lstrip("#").strip()
+        if title and title not in outline and not title.startswith("範本") and len(title) <= 40:
+            outline.append(title)
+    fields: list[str] = []
+    for match in _FIELD_RE.finditer(user):
+        name = match.group(1)
+        if name not in fields and not name.startswith("【"):
+            fields.append(name)
+    attendees = sorted(set(re.findall(r"[王李陳林張黃吳劉蔡楊][一-鿿]{2}", user)))[:8]
+    return {
+        "title_pattern": "沿用範本標題",
+        "header_fields": fields[:8],
+        "outline": outline[:20] or ["會議資訊", "討論事項", "決議事項", "待辦事項"],
+        "attendees": attendees,
+        "terms": ["summery", "會議紀錄"],
+        "style_notes": ["mock：依範本段落順序撰寫"],
+    }
+
+
+def _mock_minutes(user: str) -> str:
+    """撰寫會議紀錄：依【範本格式分析】的段落順序產生 Markdown（沒有範本就用預設格式）。"""
+    outline = ["會議資訊", "討論事項", "決議事項", "待辦事項"]
+    fields = ["時間", "地點", "主席", "出席人員", "記錄"]
+    match = re.search(r"【範本格式分析】\n(.*?)\n\n【", user, re.S)
+    if match:
+        try:
+            profile = json.loads(match.group(1))
+            outline = [str(x) for x in profile.get("outline") or []] or outline
+            fields = [str(x) for x in profile.get("header_fields") or []] or fields
+        except json.JSONDecodeError:
+            pass
+    title = "會議紀錄"
+    digest = re.search(r"【本次會議整理結果】\n(.*?)\n\n請輸出", user, re.S)
+    decisions: list[str] = []
+    if digest:
+        try:
+            data = json.loads(digest.group(1))
+            title = str(data.get("title") or title)
+            decisions = [str(d) for d in data.get("decisions") or []]
+        except json.JSONDecodeError:
+            pass
+    lines = [f"# {title}", ""]
+    lines += [f"- {name}：（未提及）" for name in fields]
+    for heading in outline:
+        lines += ["", f"## {heading}", "", f"- mock：{heading}的本次內容（依整理結果撰寫）"]
+        if "決議" in heading:
+            lines += [f"- 決議：{d}" for d in decisions]
+    return "\n".join(lines) + "\n"
+
+
 def mock_chat_completion(body: dict[str, Any], *, rng: random.Random | None = None) -> dict[str, Any]:
     messages = body.get("messages") or []
     system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
@@ -144,7 +204,12 @@ def mock_chat_completion(body: dict[str, Any], *, rng: random.Random | None = No
     notes = _note_indices(user)
     json_mode = bool((body.get("response_format") or {}).get("type") == "json_object")
 
-    if any(k in system for k in _MAP_MARKERS) or "逐字稿片段" in system:
+    text_reply: str | None = None
+    if any(k in system for k in _REFERENCE_MARKERS):
+        payload = _mock_reference(user)
+    elif any(k in system for k in _MINUTES_MARKERS):
+        payload, text_reply = {}, _mock_minutes(user)
+    elif any(k in system for k in _MAP_MARKERS) or "逐字稿片段" in system:
         span = f"{paras[0]}-{paras[-1]}" if paras else "1-1"
         payload = {
             "summary": f"區塊 {marker}（段落 {span}）的重點：說明長影音處理的做法與注意事項。",
@@ -191,7 +256,7 @@ def mock_chat_completion(body: dict[str, Any], *, rng: random.Random | None = No
     else:
         payload = {"summary": f"mock 回應 {marker}", "key_points": []}
 
-    text = json.dumps(payload, ensure_ascii=False)
+    text = text_reply if text_reply is not None else json.dumps(payload, ensure_ascii=False)
     usage = {
         "prompt_tokens": max(1, len(user) // 4),
         "completion_tokens": max(1, len(text) // 4),

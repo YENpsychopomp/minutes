@@ -128,3 +128,113 @@ def clean_env(monkeypatch):
             monkeypatch.delenv(name, raising=False)
     # 清完一定要重新關掉 .env 自動載入，否則 repo 根目錄的真實 .env 會混進測試
     monkeypatch.setenv("SUMMERY_DOTENV", "0")
+
+
+# ------------------------------------------------------------------ 文件
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _esc(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _run(text: str) -> str:
+    return f'<w:r><w:t xml:space="preserve">{_esc(text)}</w:t></w:r>'
+
+
+def build_docx(path: Path, blocks: list[tuple]) -> Path:
+    """以標準函式庫寫出最小可用的 .docx。
+
+    blocks：("h1"|"h2", 文字)、("p", 文字)、("num", 文字, 層級)（Word 自動編號「一、」「(1)」）、
+    ("bullet", 文字)、("table", [[儲存格, ...], ...])。
+    """
+    import zipfile
+
+    body: list[str] = []
+    for block in blocks:
+        kind = block[0]
+        if kind in ("h1", "h2"):
+            style = "1" if kind == "h1" else "2"  # 中文版 Word 的標題樣式 ID 就是 1、2
+            body.append(f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>{_run(block[1])}</w:p>')
+        elif kind == "p":
+            body.append(f"<w:p>{_run(block[1])}</w:p>")
+        elif kind == "num":
+            level = block[2] if len(block) > 2 else 0
+            body.append(
+                f'<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr></w:pPr>{_run(block[1])}</w:p>'
+            )
+        elif kind == "bullet":
+            body.append(
+                f'<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>{_run(block[1])}</w:p>'
+            )
+        elif kind == "table":
+            rows = "".join(
+                "<w:tr>" + "".join(f"<w:tc><w:p>{_run(cell)}</w:p></w:tc>" for cell in row) + "</w:tr>"
+                for row in block[1]
+            )
+            body.append(f"<w:tbl>{rows}</w:tbl>")
+    document = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{_W_NS}"><w:body>{"".join(body)}</w:body></w:document>'
+    styles = (
+        f'<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="{_W_NS}">'
+        '<w:style w:type="paragraph" w:styleId="1"><w:name w:val="heading 1"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 2"/></w:style>'
+        "</w:styles>"
+    )
+    numbering = (
+        f'<?xml version="1.0" encoding="UTF-8"?><w:numbering xmlns:w="{_W_NS}">'
+        '<w:abstractNum w:abstractNumId="0">'
+        '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="taiwaneseCountingThousand"/><w:lvlText w:val="%1、"/></w:lvl>'
+        '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="(%2)"/></w:lvl>'
+        "</w:abstractNum>"
+        '<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="●"/></w:lvl></w:abstractNum>'
+        '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+        '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>'
+        "</w:numbering>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        "</Relationships>"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("word/document.xml", document)
+        zf.writestr("word/styles.xml", styles)
+        zf.writestr("word/numbering.xml", numbering)
+    return path
+
+
+#: 一份典型的「過往會議紀錄」範本
+TEMPLATE_BLOCKS = [
+    ("h1", "資訊工程系第 12 次系務會議紀錄"),
+    ("p", "時間：2026 年 10 月 7 日（三）中午 12 時"),
+    ("p", "地點：工程館 B201"),
+    ("p", "主席：王大明主任"),
+    ("p", "出席人員：王大明、李小華、陳志強"),
+    ("p", "記錄：林雅婷"),
+    ("num", "報告事項"),
+    ("num", "AI 中心機房擴充進度", 1),
+    ("num", "討論事項"),
+    ("num", "決議事項"),
+    ("table", [["事項", "負責人", "期限"], ["採購 GPU 伺服器", "陳志強", "11 月底"]]),
+    ("num", "臨時動議"),
+]
+
+
+@pytest.fixture
+def make_docx(tmp_path):
+    def make(name: str = "template.docx", blocks: list[tuple] | None = None) -> Path:
+        return build_docx(tmp_path / name, blocks or TEMPLATE_BLOCKS)
+
+    return make

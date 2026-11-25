@@ -3,6 +3,8 @@
     summery run 講座.mp4 --chunk-seconds 600
     summery transcribe podcast.mp3 --formats srt,txt
     summery summarize out/podcast.transcript.json --style concise
+    summery minutes 筆記.docx 補充.md --template 上次紀錄.docx   # 從文件產出會議紀錄
+    summery run 例會.mp4 --template 上次紀錄.docx              # 影音紀錄沿用過往紀錄的格式
     summery plan 講座.mp4                      # 只看切塊計畫，不打 API
     summery probe 講座.mp4                     # 媒體資訊
     summery serve --port 8765                  # 網頁上傳介面
@@ -71,6 +73,16 @@ def _add_summary_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instruction", help="額外的摘要指示（例：聚焦法遵風險）")
     parser.add_argument("--no-chapters", action="store_true", help="不輸出彩章摘要")
     parser.add_argument("--title", help="標題提示（用於摘要與逐字稿標題）")
+    parser.add_argument(
+        "--template", dest="templates", action="append", default=[], metavar="PATH",
+        help="過往會議紀錄（.docx/.md/.txt/.pdf…，可重複）：沿用其格式、段落結構、用語、與會者與專有名詞，"
+             "並另外輸出 <名稱>.minutes.md",
+    )
+    minutes = parser.add_mutually_exclusive_group()
+    minutes.add_argument("--minutes", dest="minutes", action="store_true", default=None,
+                         help="一定要輸出 minutes.md（沒有範本時用標準會議紀錄格式）")
+    minutes.add_argument("--no-minutes", dest="minutes", action="store_false",
+                         help="不輸出 minutes.md（預設：有範本或輸入是文件時才輸出）")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="完整流程：轉錄 + 摘要")
-    run.add_argument("input", help="影片或音訊檔案（mp4/mov/mkv/mp3/wav/…）")
+    run.add_argument("input", help="影片或音訊檔案（mp4/mov/mkv/mp3/wav/…）；給文件（docx/md/txt/pdf/srt/vtt）則略過轉錄")
     _add_common(run)
     _add_run_flags(run)
     _add_summary_flags(run)
@@ -109,6 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("-o", "--out-dir", help="輸出目錄（預設與逐字稿同目錄）")
     sm.add_argument("--formats", help="輸出格式（預設 md,json）")
     sm.add_argument("--json", action="store_true")
+
+    mn = sub.add_parser("minutes", help="從文件（筆記、逐字稿、過往紀錄）產出會議紀錄")
+    mn.add_argument("documents", nargs="+", help="一或多份文件：.docx/.md/.txt/.pdf/.srt/.vtt/.json")
+    _add_common(mn)
+    _add_summary_flags(mn)
+    mn.add_argument("-o", "--out-dir", help="輸出目錄（預設與第一份文件同目錄）")
+    mn.add_argument("--formats", help="逐字稿／原文輸出格式（預設 md,json,txt；文件沒有時間軸，不輸出 srt/vtt）")
+    mn.add_argument("--job-id", help="指定工作 ID")
+    mn.add_argument("--concurrency", type=int, help="摘要並行數（預設 4）")
+    mn.add_argument("--json", action="store_true", help="結束時輸出結果 JSON")
 
     pl = sub.add_parser("plan", help="顯示切塊計畫（不打 API）")
     pl.add_argument("input")
@@ -237,6 +259,8 @@ def _options_from_args(args: argparse.Namespace) -> JobOptions:
         concurrency=getattr(args, "concurrency", None),
         title_hint=getattr(args, "title", None),
         verify_ssl=not getattr(args, "no_ssl_verify", False),
+        references=[str(Path(t).expanduser()) for t in getattr(args, "templates", None) or []] or None,
+        minutes=getattr(args, "minutes", None),
     )
 
 
@@ -246,13 +270,23 @@ def _print_result(result: JobResult, *, as_json: bool = False) -> int:
     else:
         print()
         print(f"工作 ID   : {result.job_id}")
-        print(f"媒體長度  : {fmt_clock(result.duration, force_hours=True)}（{result.duration:.1f}s）")
-        print(f"切塊      : {result.plan.get('count', 0)} 塊（靜音對齊 {result.plan.get('snapped', 0)}）")
-        print(f"逐字稿    : {len(result.transcript.segments)} 段 / {result.transcript.char_count()} 字")
+        if result.stats.get("input_kind") == "document":
+            names = [str(d.get("name")) for d in result.transcript.meta.get("documents") or [] if isinstance(d, dict)]
+            print(f"輸入文件  : {len(names) or 1} 份（{'、'.join(names)}）")
+            print(f"原文      : {len(result.transcript.segments)} 段 / {result.transcript.char_count()} 字")
+        else:
+            print(f"媒體長度  : {fmt_clock(result.duration, force_hours=True)}（{result.duration:.1f}s）")
+            print(f"切塊      : {result.plan.get('count', 0)} 塊（靜音對齊 {result.plan.get('snapped', 0)}）")
+            print(f"逐字稿    : {len(result.transcript.segments)} 段 / {result.transcript.char_count()} 字")
+        if result.stats.get("references"):
+            print(f"範本      : {'、'.join(result.stats['references'])}")
         if result.summary:
             print(f"摘要      : {result.summary.title}")
             print(f"            TL;DR {result.summary.tldr[:80]}")
             print(f"            章節 {len(result.summary.chapters)}、重點 {len(result.summary.key_points)}")
+        if result.summary and result.summary.minutes_markdown:
+            origin = (result.summary.meta.get("minutes") or {}).get("format")
+            print(f"會議紀錄  : {'依範本格式' if origin == 'template' else '標準格式'}（minutes.md）")
         print(f"耗時      : {result.elapsed:.1f}s"
               + (f"（{result.stats.get('realtime_factor')}x realtime）" if result.stats.get("realtime_factor") else ""))
         if result.stats.get("llm_usage"):
@@ -299,33 +333,107 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     return cmd_run(args)
 
 
+def cmd_minutes(args: argparse.Namespace) -> int:
+    """從文件產出會議紀錄：等同 ``run``，但輸入是一或多份文件（不經 ASR）。"""
+    from .documents import is_document, unsupported_hint
+
+    paths = [Path(d).expanduser() for d in args.documents]
+    for path in paths:
+        if not path.is_file():
+            sys.stderr.write(f"✗ 找不到文件：{path}\n")
+            return EXIT_ERROR
+        if not is_document(path):
+            hint = unsupported_hint(path) or "支援 .docx/.md/.txt/.pdf/.srt/.vtt/.json；影音檔請用 summery run"
+            sys.stderr.write(f"✗ {path.name}：{hint}\n")
+            return EXIT_ERROR
+    args.input = str(paths[0])
+    if not args.formats:
+        args.formats = "md,json,txt"
+    cfg = _cfg_from_args(args)
+    options = _options_from_args(args)
+    options.extra_inputs = [str(p) for p in paths[1:]] or None
+    printer = ProgressPrinter(enabled=not args.quiet)
+    cancel = threading.Event()
+    _install_sigint(cancel)
+    started = time.perf_counter()
+    try:
+        result = Pipeline(cfg, options=options, progress=printer, cancel=cancel).run(paths[0])
+    except KeyboardInterrupt:
+        sys.stderr.write("\n已取消\n")
+        return EXIT_CANCELLED
+    except (JobError, ConfigError) as exc:
+        sys.stderr.write(f"\n✗ 失敗：{exc}\n")
+        return EXIT_ERROR
+    printer("done", 1.0, f"完成（總計 {time.perf_counter() - started:.1f}s）")
+    return _print_result(result, as_json=getattr(args, "json", False))
+
+
 def cmd_summarize(args: argparse.Namespace) -> int:
     cfg = _cfg_from_args(args)
     path = Path(args.transcript).expanduser()
     if not path.is_file():
         sys.stderr.write(f"✗ 找不到逐字稿：{path}\n")
         return EXIT_ERROR
-    from .transcript import Transcript, transcript_from_text
+    from .documents import DocumentError, documents_to_transcript, is_document, load_document, load_documents
     from .llm import LLMClient
+    from .minutes import analyze_references, compose_minutes
     from .summarizer import Summarizer
+    from .transcript import Transcript, transcript_from_text
 
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    transcript = Transcript.from_json(raw) if path.suffix.lower() == ".json" else transcript_from_text(
-        raw, args.duration or max(60.0, len(raw) / 2.5)
-    )
     options = _options_from_args(args)
     cfg = options.apply_to(cfg)
+    dcfg = cfg.documents
+    doc_kwargs = {"markitdown_cmd": dcfg.markitdown_cmd, "markitdown_timeout": dcfg.markitdown_timeout,
+                  "paragraph_max_chars": dcfg.paragraph_max_chars}
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".json":
+            transcript = Transcript.from_json(path.read_text(encoding="utf-8", errors="replace"))
+        elif suffix == ".txt":
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            transcript = transcript_from_text(raw, args.duration or max(60.0, len(raw) / 2.5))
+        elif is_document(path):  # .docx/.md/.pdf/.srt/.vtt
+            transcript = documents_to_transcript([load_document(path, **doc_kwargs)])
+        else:
+            sys.stderr.write(f"✗ 不支援的逐字稿格式：{path.suffix or '(無副檔名)'}\n")
+            return EXIT_ERROR
+        references = load_documents(options.references or [], **doc_kwargs)
+    except DocumentError as exc:
+        sys.stderr.write(f"✗ {exc}\n")
+        return EXIT_ERROR
+    is_doc = transcript.meta.get("source_kind") == "document"
+    want_minutes = options.minutes if options.minutes is not None else bool(references) or is_doc
     printer = ProgressPrinter(enabled=not args.quiet)
     printer("summarize", 0.05, f"逐字稿 {transcript.char_count()} 字，開始摘要")
     cfg.require_api_key("llm")
     llm = LLMClient(cfg.llm, api_key=cfg.resolve_api_key("llm"), verify_ssl=not args.no_ssl_verify)
-    summarizer = Summarizer(llm, cfg.summarize, progress=lambda stage, frac, msg: printer(stage, frac, msg))
+    out_dir = Path(args.out_dir or path.parent).expanduser()
+    warnings: list[str] = []
+    profile = None
+    if references:
+        printer("reference", 0.06, f"分析 {len(references)} 份過往會議紀錄的格式與用語")
+        profile = analyze_references(references, llm=llm, cfg=cfg, cache_dir=Path(cfg.work_dir).expanduser(),
+                                     warnings=warnings)
+    summarizer = Summarizer(llm, cfg.summarize, progress=lambda stage, frac, msg: printer(stage, frac, msg),
+                            reference_hint=profile.hint_text() if profile else None)
     try:
-        summary = summarizer.summarize(transcript, title_hint=args.title or path.stem)
+        summary = summarizer.summarize(transcript, title_hint=args.title or slugify_stem(path.stem))
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"✗ 摘要失敗：{exc}\n")
         return EXIT_ERROR
-    out_dir = Path(args.out_dir or path.parent).expanduser()
+    if profile:
+        summary.meta["reference"] = profile.to_dict()
+    if want_minutes:
+        printer("minutes", 0.98, "依範本撰寫會議紀錄" if profile else "撰寫會議紀錄")
+        source_desc = f"文件：{path.name}" if is_doc else f"逐字稿「{path.name}」"
+        text, origin = compose_minutes(summary, llm=llm, cfg=cfg, profile=profile, source_desc=source_desc,
+                                       warnings=warnings)
+        summary.minutes_markdown = text
+        summary.meta["minutes"] = {"source": origin, "format": "template" if profile else "default",
+                                   "template": list(profile.files) if profile else []}
+    if warnings:
+        summary.meta.setdefault("warnings", []).extend(warnings)
+    summary.meta["llm_usage"] = llm.usage.to_dict()
     cfg.output.formats = [f.strip().lower() for f in (args.formats or "md,json").split(",") if f.strip()]
     stem = cfg.output.stem or f"{slugify_stem(path.stem)}"
     summary_md = out_dir / f"{stem}.summary.md"
@@ -334,11 +442,18 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     summary_json = out_dir / f"{stem}.summary.json"
     summary_json.write_text(summary.to_json() + "\n", encoding="utf-8")
     outputs = {"summary.md": str(summary_md), "summary.json": str(summary_json)}
+    if summary.minutes_markdown:
+        minutes_md = out_dir / f"{stem}.minutes.md"
+        minutes_md.write_text(summary.minutes_markdown, encoding="utf-8")
+        outputs["minutes.md"] = str(minutes_md)
+    if is_doc:
+        # 文件沒有時間軸：不輸出 srt／vtt
+        cfg.output.formats = [f for f in cfg.output.formats if f not in ("srt", "vtt")]
     if path.suffix.lower() != ".json":
         # 輸入是純文字逐字稿：順便輸出正規化的 md/json，讓時間戳與格式與其他指令一致
         outputs.update(
             write_outputs(out_dir=out_dir, stem=stem, transcript=transcript,
-                          summary=None, cfg=cfg, source_name=path.name)
+                          summary=None, cfg=cfg, source_name=path.name, protect=[path])
         )
     if getattr(args, "json", False):
         print(json.dumps({"summary": summary.to_dict(), "outputs": outputs}, ensure_ascii=False, indent=2))
@@ -580,7 +695,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if hasattr(args, "log_level"):
         args.log_level = level
     handlers = {
-        "run": cmd_run, "transcribe": cmd_transcribe, "summarize": cmd_summarize,
+        "run": cmd_run, "transcribe": cmd_transcribe, "summarize": cmd_summarize, "minutes": cmd_minutes,
         "plan": cmd_plan, "probe": cmd_probe, "serve": cmd_serve,
         "mock-server": cmd_mock_server, "make-media": cmd_make_media, "jobs": cmd_jobs,
     }

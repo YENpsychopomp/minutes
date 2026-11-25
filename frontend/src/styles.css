@@ -1462,3 +1462,179 @@ blockquote.quote {
     grid-template-columns: 1fr;
   }
 }
+
+/* --------------------------------------------------------- 文件與範本 */
+
+.doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.doc-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 8px 10px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--sheet-sunk);
+}
+
+.doc-row[data-state="error"] {
+  border-color: var(--rust);
+  background: var(--rust-tint);
+}
+
+.doc-row-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  color: var(--sage);
+}
+
+.doc-row[data-state="uploading"] .doc-row-icon {
+  color: var(--amber-deep);
+}
+
+.doc-row[data-state="error"] .doc-row-icon {
+  color: var(--rust);
+  border-color: var(--rust);
+}
+
+.doc-row .grow {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 1px;
+}
+
+.doc-row-name {
+  font-weight: 600;
+  font-size: 14.5px;
+  overflow-wrap: anywhere;
+}
+
+.doc-row-meta {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.doc-row[data-state="error"] .doc-row-meta,
+.doc-row-warn {
+  color: var(--rust);
+}
+
+.minutes-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* 會議紀錄（minutes.md）的閱讀版面 */
+.md-view {
+  font-size: 15.5px;
+  line-height: 1.85;
+  color: var(--ink);
+}
+
+.md-view h1 {
+  font-family: var(--font-display);
+  font-size: clamp(24px, 2.8vw, 32px);
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  margin: 0 0 16px;
+}
+
+.md-view h2 {
+  font-size: 18.5px;
+  margin: 28px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.md-view h3 {
+  font-size: 16.5px;
+  margin: 20px 0 8px;
+  color: var(--indigo-ink);
+}
+
+.md-view h4 {
+  font-size: 15.5px;
+  margin: 16px 0 6px;
+}
+
+.md-view p {
+  margin: 0 0 10px;
+}
+
+.md-view ul,
+.md-view ol {
+  margin: 0 0 12px;
+  padding-left: 24px;
+}
+
+.md-view li {
+  margin: 3px 0;
+}
+
+.md-view li::marker {
+  color: var(--amber-deep);
+}
+
+.md-view blockquote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--amber-line);
+  color: var(--ink-soft);
+}
+
+.md-view hr {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 20px 0;
+}
+
+.md-view code {
+  font-family: var(--font-num);
+  font-size: 0.9em;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--sheet-sunk);
+}
+
+.md-table {
+  overflow-x: auto;
+  margin: 6px 0 16px;
+}
+
+.md-view table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14.5px;
+}
+
+.md-view th,
+.md-view td {
+  border: 1px solid var(--rule);
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-view th {
+  background: var(--sheet-sunk);
+  font-weight: 600;
+}

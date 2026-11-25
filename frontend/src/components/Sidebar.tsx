@@ -39,6 +39,18 @@ export function Sidebar({ jobs, activeId, onSelect, config }: Props) {
                   <span style={{ minWidth: 0 }}>{job.name}</span>
                 </span>
                 <span className="job-card-meta">
+                  {job.kind === "document" ? (
+                    <>
+                      <span>文件</span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  ) : null}
+                  {job.references?.length ? (
+                    <>
+                      <span>依範本</span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  ) : null}
                   <span>{STATUS_LABEL[job.status] ?? job.status}</span>
                   <span aria-hidden="true">·</span>
                   <span>{relativeTime(job.created_at)}</span>

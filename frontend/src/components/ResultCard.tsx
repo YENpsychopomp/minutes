@@ -1,12 +1,50 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { fetchText, fileUrl } from "../api";
-import { clock, FORMAT_LABEL } from "../format";
+import { clock, formatLabel } from "../format";
 import type { JobDetail } from "../types";
-import { IconBraces, IconDoc, IconDownload, IconPause, IconPlay, IconWave } from "./Icons";
+import { IconBraces, IconCheck, IconDoc, IconDownload, IconFeather, IconLink, IconPause, IconPlay, IconWave } from "./Icons";
+import { MarkdownView } from "./MarkdownView";
 import { SummaryDoc } from "./SummaryDoc";
 import { TranscriptPanel } from "./TranscriptPanel";
 
-type TabKey = "summary" | "transcript" | "raw";
+type TabKey = "minutes" | "summary" | "transcript" | "raw";
+
+function MinutesView({ job, markdown }: { job: JobDetail; markdown: string }) {
+  const [copied, setCopied] = useState(false);
+  const meta = job.result?.summary?.meta;
+  const file = job.files?.find((f) => f.format === "minutes.md");
+  const template = meta?.minutes?.template?.length ? meta.minutes.template : job.references ?? [];
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <article className="doc">
+      <div className="minutes-toolbar">
+        <span className="chip">{template.length ? `依範本：${template.join("、")}` : "標準會議紀錄格式"}</span>
+        {meta?.minutes?.source === "local" ? <span className="chip chip-rust">模型未回應，以本地格式組成</span> : null}
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button type="button" className="btn btn-ghost" onClick={() => void copy()}>
+            {copied ? <IconCheck size={16} /> : <IconLink size={16} />}
+            {copied ? "已複製" : "複製 Markdown"}
+          </button>
+          {file ? (
+            <a className="btn btn-ghost" href={fileUrl(job.job_id, file.name)} download={file.name}>
+              <IconDownload size={16} />
+              下載
+            </a>
+          ) : null}
+        </span>
+      </div>
+      <MarkdownView source={markdown} />
+    </article>
+  );
+}
 
 interface Props {
   job: JobDetail;
@@ -97,10 +135,12 @@ function Player({
 }
 
 export function ResultCard({ job, registerSeek, activeTime, onTime }: Props) {
-  const [tab, setTab] = useState<TabKey>("summary");
+  const minutes = job.result?.minutes_markdown || job.result?.summary?.minutes_markdown || "";
+  const [tab, setTab] = useState<TabKey>(minutes ? "minutes" : "summary");
   const [raw, setRaw] = useState<string | null>(null);
   const summary = job.result?.summary;
   const hasTranscript = Boolean(job.files?.some((f) => f.format === "json") || job.result?.transcript?.text);
+  const isDocument = job.kind === "document" || summary?.meta?.input_kind === "document";
 
   useEffect(() => {
     if (tab !== "raw" || raw !== null) return;
@@ -115,11 +155,20 @@ export function ResultCard({ job, registerSeek, activeTime, onTime }: Props) {
   }, [tab, raw, job.files, job.job_id]);
 
   const tabs: { key: TabKey; label: string; icon: ReactNode; enabled: boolean }[] = [
+    ...(minutes ? [{ key: "minutes" as const, label: "會議紀錄", icon: <IconFeather size={16} />, enabled: true }] : []),
     { key: "summary", label: "摘要", icon: <IconDoc size={16} />, enabled: Boolean(summary) },
-    { key: "transcript", label: "逐字稿", icon: <IconWave size={16} />, enabled: hasTranscript },
+    { key: "transcript", label: isDocument ? "原文" : "逐字稿", icon: <IconWave size={16} />, enabled: hasTranscript },
     { key: "raw", label: "原始 JSON", icon: <IconBraces size={16} />, enabled: true },
   ];
-  const currentTab = tabs.find((t) => t.key === tab && t.enabled) ? tab : summary ? "summary" : hasTranscript ? "transcript" : "raw";
+  const currentTab = tabs.find((t) => t.key === tab && t.enabled)
+    ? tab
+    : minutes
+      ? "minutes"
+      : summary
+        ? "summary"
+        : hasTranscript
+          ? "transcript"
+          : "raw";
 
   return (
     <section className="sheet fade-up">
@@ -144,6 +193,8 @@ export function ResultCard({ job, registerSeek, activeTime, onTime }: Props) {
         {job.media_url ? (
           <Player src={job.media_url} onTime={(value) => onTime?.(value)} registerSeek={registerSeek} />
         ) : null}
+
+        {currentTab === "minutes" && minutes ? <MinutesView job={job} markdown={minutes} /> : null}
 
         {currentTab === "summary" && summary ? (
           <SummaryDoc
@@ -177,7 +228,7 @@ export function ResultCard({ job, registerSeek, activeTime, onTime }: Props) {
                   <IconDownload size={16} />
                   <span className="grow">
                     <a href={fileUrl(job.job_id, file.name)} download={file.name}>
-                      {FORMAT_LABEL[file.format] ?? file.format}
+                      {formatLabel(file.format, isDocument)}
                     </a>
                     {file.size ? <span className="chip num" style={{ marginLeft: 8 }}>{(file.size / 1024).toFixed(0)} KB</span> : null}
                   </span>
