@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "summery"
+version = "0.1.0"
+description = "影片/音訊 → 逐字稿 + 摘要 的長影音處理管線（OpenAI 相容 ASR / LLM）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "NKUST AI" }]
+keywords = ["asr", "whisper", "transcription", "summarization", "long-audio"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+summery = "summery.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+summery = ["web_static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

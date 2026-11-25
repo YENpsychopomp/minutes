@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.build/
+dist/
+build/
+.pytest_cache/
+.summery_work/
+summery_jobs/
+*.log
+.env
+my.toml
+src/*.egg-info/
+.venv/
+venv/
+
+# 前端（Vite）
+node_modules/
+frontend/dist/
+.ui_shots/
+.chrome-profile/
+*.local
+
+# 系統檔
+.DS_Store
+
+# 個人錄音與產出（含隱私內容，不入版控）
+audio/
+output/
+
+# pnpm 本地 store
+.pnpm-store/
+
+# tsc 編譯產物（原始碼為 .ts/.tsx）
+frontend/src/**/*.js
+frontend/vite.config.js
+*.tsbuildinfo
