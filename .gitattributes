@@ -1,0 +1,4 @@
+# Windows 腳本保持 CRLF；deploy.ps1 另需 UTF-8 BOM（Windows PowerShell 5.1 才讀得懂中文）
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf
