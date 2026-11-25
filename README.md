@@ -30,9 +30,8 @@ ASR 與 LLM 走 **OpenAI 相容 API**（可自行指定 `base_url`），並為**
 
 ## 安裝
 
-需要 Python 3.11+ 與 ffmpeg（含 ffprobe）：
+需要 Python 3.11+ 與 ffmpeg（含 ffprobe）。
 
-```bash
 ### macOS／Linux
 
 ```bash
@@ -51,41 +50,53 @@ PYTHONPATH=src python3 -m summery --help
 
 ### Windows
 
-以下指令在 **PowerShell** 執行。先用 winget 安裝 Python、ffmpeg 與 Git（裝完請**重開 PowerShell**，讓 PATH 生效）：
+以下指令在 **PowerShell** 執行，用 conda 一次備齊 Python、ffmpeg（含 ffprobe）與 Git。
+
+**1. 安裝 conda**（已有 Anaconda／Miniconda 可略過）：
 
 ```powershell
-winget install Python.Python.3.12
-winget install Gyan.FFmpeg
-winget install Git.Git
+winget install Anaconda.Miniconda3
+conda init powershell              # 讓 PowerShell 認得 conda activate；完成後請重開 PowerShell
+```
+
+> 沒有 winget 時：從 <https://www.anaconda.com/download/success> 下載 Miniconda 安裝，或直接改用開始選單裡的「Anaconda PowerShell Prompt」。
+> `conda init` 後重開 PowerShell 若出現「因為這個系統上已停用指令碼執行」：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+
+**2. 建立環境**（Python、ffmpeg、Git 都從 conda-forge 裝進這個環境，不動系統 PATH）：
+
+```powershell
+conda create -n summery -c conda-forge python=3.12 ffmpeg git -y
+conda activate summery
 
 ffmpeg -version; ffprobe -version   # 確認兩者都找得到
 ```
 
-> 沒有 winget 時：Python 從 <https://www.python.org/downloads/> 安裝（勾選「Add python.exe to PATH」），ffmpeg 可下載 <https://www.gyan.dev/ffmpeg/builds/> 的 release 版，解壓後把其中的 `bin` 資料夾加入 PATH。
-
-下載專案並安裝（建議用虛擬環境）：
+**3. 下載專案並安裝**：
 
 ```powershell
 git clone https://github.com/YENpsychopomp/minutes.git
 cd minutes
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1      # 若被執行原則擋下：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-pip install -e .
+pip install -e .                    # 安裝到 summery 環境
 summery --help
 ```
 
-不想安裝也可以直接用原始碼執行：
+不想安裝也可以直接用原始碼執行（同樣要先 `conda activate summery`）：
 
 ```powershell
 $env:PYTHONPATH = "src"
-py -m summery --help
+python -m summery --help
 ```
 
-啟動網頁介面：用 Windows 版一鍵腳本 `deploy.ps1`（參數與 `deploy.sh` 相同，見[一鍵啟動](#一鍵啟動deploysh)），或**直接雙擊 `deploy.cmd`**：
+之後每次開新的 PowerShell，先 `conda activate summery` 再使用 `summery`。
+
+啟動網頁介面：用 Windows 版一鍵腳本 `deploy.ps1`（參數與 `deploy.sh` 相同，見[一鍵啟動](#一鍵啟動deploysh)）。腳本會自動使用目前已啟用的 conda 環境：
 
 ```powershell
+conda activate summery
 .\deploy.ps1 --open
 ```
+
+> 直接雙擊 `deploy.cmd` 時不會啟用 conda 環境，可能找不到 Python 或用到別的 Python；請在已 `conda activate summery` 的視窗裡執行 `.\deploy.cmd`。
 
 > 小提醒：在 PowerShell 裡含空白或中文的檔名請加引號，例如 `summery run "C:\錄音\1019 會議.m4a"`。
 
@@ -376,7 +387,7 @@ Windows 版做的檢查與 `deploy.sh` 相同，參數也一樣，寫成 `--port
 .\deploy.ps1 --python C:\Python312\python.exe
 ```
 
-* **找 Python 的順序**：`--python` → 環境變數 `PYTHON` → `.venv\Scripts\python.exe` → `py -3` 啟動器 → PATH 上的 `python`（會跳過 Windows 那個只會開 Microsoft Store 的假 `python.exe`）。
+* **找 Python 的順序**：`--python` → 環境變數 `PYTHON` → `.venv\Scripts\python.exe` → 已啟用的 conda 環境（`CONDA_PREFIX`，版本不到 3.11 就略過）→ `py -3` 啟動器 → PATH 上的 `python`（會跳過 Windows 那個只會開 Microsoft Store 的假 `python.exe`）。
 * **被執行原則擋下**（「因為這個系統上已停用指令碼執行」）：改用 `deploy.cmd`（可直接雙擊，參數相同，例如 `deploy.cmd --port 9000`），或執行 `powershell -ExecutionPolicy Bypass -File .\deploy.ps1`。這兩種都只對這一次執行放行，不會改系統設定。
 * **停止**：Ctrl+C 或關閉 PowerShell 視窗。子行程跟腳本共用同一個視窗，關掉視窗就一起結束。開發模式收尾時會用 `taskkill /T` 把 pnpm → node 整串子行程一起關掉。
 * 支援 Windows PowerShell 5.1（Windows 10/11 內建）與 PowerShell 7+。`deploy.ps1` 必須以 **UTF-8（含 BOM）** 儲存，否則 5.1 讀中文會變亂碼（`.gitattributes` 已設定換行，編輯器存檔時請保留 BOM）。
