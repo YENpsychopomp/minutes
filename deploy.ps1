@@ -9,6 +9,8 @@
 #   .\deploy.ps1 --host 0.0.0.0  綁到整個網路（請自行處理防火牆／身分驗證）
 #   .\deploy.ps1 --jobs-dir D:\jobs  換工作目錄
 #   .\deploy.ps1 --python .venv\Scripts\python.exe  指定 Python 直譯器
+#   .\deploy.ps1 --env myenv  自動啟用的 conda 環境名稱（預設 summery；不必先 conda activate）
+#   .\deploy.ps1 --no-conda   不要自動啟用 conda 環境
 #   .\deploy.ps1 --open       啟動後打開瀏覽器
 #
 # 參數也可以寫成 PowerShell 風格：-Dev、-Port 9000、-NoBuild、-JobsDir D:\jobs …
@@ -39,11 +41,25 @@ $Python = if ($env:PYTHON) { $env:PYTHON } else { '' }
 $Build = 'auto'       # auto | yes | no
 $Dev = $false
 $Open = $false
+$CondaEnv = if ($env:SUMMERY_CONDA_ENV) { $env:SUMMERY_CONDA_ENV } else { 'summery' }
+$script:SavedEnv = $null   # 自動啟用 conda 前的環境變數，結束時還原
 
 function Write-Info([string]$Message) { Write-Host '• ' -ForegroundColor Cyan -NoNewline; Write-Host $Message }
 function Write-Warn([string]$Message) { Write-Host '! ' -ForegroundColor Yellow -NoNewline; Write-Host $Message }
 function Write-Ok([string]$Message) { Write-Host '✓ ' -ForegroundColor Green -NoNewline; Write-Host $Message }
-function Exit-Script([int]$Code) { Pop-Location; exit $Code }
+
+function Restore-CondaEnv {
+    # 腳本跑在呼叫者的 PowerShell 裡：自動啟用的環境只給這次服務用，結束後把變數還原
+    if ($null -eq $script:SavedEnv) { return }
+    foreach ($key in $script:SavedEnv.Keys) {
+        $value = $script:SavedEnv[$key]
+        if ($null -eq $value) { Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue }
+        else { Set-Item -LiteralPath "Env:$key" -Value $value }
+    }
+    $script:SavedEnv = $null
+}
+
+function Exit-Script([int]$Code) { Restore-CondaEnv; Pop-Location; exit $Code }
 function Fail([string]$Message) { Write-Host "✗ $Message" -ForegroundColor Red; Exit-Script 1 }
 
 function Show-Usage {
@@ -68,12 +84,78 @@ while ($i -lt $args.Count) {
         { $_ -in 'host', 'bindhost' } { if (-not $next) { Fail '--host 需要一個位址' }; $BindHost = $next; $i += 2 }
         { $_ -in 'jobs-dir', 'jobsdir' } { if (-not $next) { Fail '--jobs-dir 需要一個路徑' }; $JobsDir = $next; $i += 2 }
         'python' { if (-not $next) { Fail '--python 需要一個 Python 直譯器路徑' }; $Python = $next; $i += 2 }
+        { $_ -in 'env', 'conda-env', 'condaenv' } { if (-not $next) { Fail '--env 需要一個 conda 環境名稱' }; $CondaEnv = $next; $i += 2 }
+        { $_ -in 'no-conda', 'noconda' } { $CondaEnv = ''; $i += 1 }
         'open' { $Open = $true; $i += 1 }
         { $_ -in 'h', 'help', '?' } { Show-Usage; Exit-Script 0 }
         default { Fail "不認識的參數：$raw（用 --help 看說明）" }
     }
 }
 if ($Port -notmatch '^\d+$') { Fail "--port 需要一個數字（收到：$Port）" }
+
+# ---------------------------------------------------------------- 0. conda 環境
+function Find-CondaEnv([string]$Name) {
+    # 先看常見的安裝位置（快），找不到再問 conda 本身（較慢，但涵蓋自訂位置）
+    $roots = @()
+    if ($env:CONDA_EXE) { $roots += (Split-Path -Parent (Split-Path -Parent $env:CONDA_EXE)) }
+    foreach ($dir in 'anaconda3', 'miniconda3', 'miniforge3', 'mambaforge') {
+        $roots += (Join-Path $env:USERPROFILE $dir)
+        if ($env:LOCALAPPDATA) { $roots += (Join-Path $env:LOCALAPPDATA $dir) }
+        if ($env:ProgramData) { $roots += (Join-Path $env:ProgramData $dir) }
+    }
+    $candidates = @($roots | ForEach-Object { Join-Path (Join-Path $_ 'envs') $Name })
+    $candidates += (Join-Path (Join-Path (Join-Path $env:USERPROFILE '.conda') 'envs') $Name)
+    foreach ($dir in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $dir 'python.exe') -PathType Leaf) { return $dir }
+    }
+    if (Get-Command conda -ErrorAction SilentlyContinue) {
+        try {
+            $info = (& conda env list --json 2>$null | Out-String) | ConvertFrom-Json
+            foreach ($dir in @($info.envs)) {
+                if ((Split-Path -Leaf $dir) -ieq $Name -and (Test-Path -LiteralPath (Join-Path $dir 'python.exe'))) { return $dir }
+            }
+        }
+        catch { }
+    }
+    return $null
+}
+
+function Enable-CondaEnv([string]$Dir, [string]$Name) {
+    # 等同 conda activate 對 PATH 與環境變數的設定：python 與 ffmpeg（在 Library\bin）都會找得到
+    $script:SavedEnv = @{}
+    foreach ($key in 'PATH', 'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'CONDA_PROMPT_MODIFIER') {
+        $script:SavedEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+    }
+    $paths = @(
+        $Dir,
+        (Join-Path $Dir 'Library\mingw-w64\bin'),
+        (Join-Path $Dir 'Library\usr\bin'),
+        (Join-Path $Dir 'Library\bin'),
+        (Join-Path $Dir 'Scripts'),
+        (Join-Path $Dir 'bin')
+    )
+    $env:PATH = (($paths | Where-Object { Test-Path -LiteralPath $_ }) -join ';') + ';' + $env:PATH
+    $env:CONDA_PREFIX = $Dir
+    $env:CONDA_DEFAULT_ENV = $Name
+    $env:CONDA_PROMPT_MODIFIER = "($Name) "
+}
+
+if ($CondaEnv) {
+    $activeName = if ($env:CONDA_PREFIX) { Split-Path -Leaf $env:CONDA_PREFIX } else { '' }
+    if ($activeName -ieq $CondaEnv) {
+        Write-Ok "conda 環境 $CondaEnv 已啟用"
+    }
+    else {
+        $envDir = Find-CondaEnv $CondaEnv
+        if ($envDir) {
+            Enable-CondaEnv $envDir $CondaEnv
+            Write-Ok "已自動啟用 conda 環境 $CondaEnv（$envDir）"
+        }
+        else {
+            Write-Warn "找不到 conda 環境 $CondaEnv，沿用目前的 Python（建立方式見 README；或用 --env 指定名稱、--no-conda 略過）"
+        }
+    }
+}
 
 # ---------------------------------------------------------------- 1. Python
 function Test-PythonExe([string]$Exe) {
@@ -318,6 +400,7 @@ if ($Dev) {
         Write-Info '正在停止…（關閉視窗也會有同樣效果）'
         foreach ($child in $children) { Stop-Tree $child }
         Write-Ok '已全部停止'
+        Restore-CondaEnv
         Pop-Location
     }
 }
@@ -331,6 +414,7 @@ else {
     finally {
         Write-Host ''
         Write-Ok '已停止'
+        Restore-CondaEnv
         Pop-Location
     }
     exit $code

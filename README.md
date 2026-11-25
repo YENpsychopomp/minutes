@@ -95,14 +95,14 @@ python -m summery --help
 
 之後每次開新的 PowerShell，先 `conda activate summery` 再使用 `summery`。
 
-啟動網頁介面：用 Windows 版一鍵腳本 `deploy.ps1`（參數與 `deploy.sh` 相同，見[一鍵啟動](#一鍵啟動deploysh)）。腳本會自動使用目前已啟用的 conda 環境：
+啟動網頁介面：用 Windows 版一鍵腳本 `deploy.ps1`（參數與 `deploy.sh` 相同，見[一鍵啟動](#一鍵啟動deploysh)）。腳本會**自動啟用名為 `summery` 的 conda 環境**，不必先 `conda activate`：
 
 ```powershell
-conda activate summery
 .\deploy.ps1 --open
 ```
 
-> 直接雙擊 `deploy.cmd` 時不會啟用 conda 環境，可能找不到 Python 或用到別的 Python；請在已 `conda activate summery` 的視窗裡執行 `.\deploy.cmd`。
+> 直接雙擊 `deploy.cmd` 也會自動啟用 `summery` 環境。環境叫別的名字就加 `--env 名稱`（或設環境變數 `SUMMERY_CONDA_ENV`），不想自動啟用就加 `--no-conda`。
+> 自動啟用只在這次服務期間有效，服務停止後原本視窗的環境變數會還原。
 
 > 小提醒：在 PowerShell 裡含空白或中文的檔名請加引號，例如 `summery run "C:\錄音\1019 會議.m4a"`。
 
@@ -471,7 +471,11 @@ Windows 版做的檢查與 `deploy.sh` 相同，參數也一樣，寫成 `--port
 .\deploy.ps1 --no-build               # 不建置；沒有 frontend\dist 時用內建介面
 .\deploy.ps1 --dev                    # 開發模式：Python API + Vite 熱更新
 .\deploy.ps1 --python C:\Python312\python.exe
+.\deploy.ps1 --env myenv              # 自動啟用別的 conda 環境（預設 summery）
+.\deploy.ps1 --no-conda               # 不自動啟用 conda 環境
 ```
+
+* **自動啟用 conda 環境**：預設找名為 `summery` 的環境（`--env` 或 `SUMMERY_CONDA_ENV` 可改），先查 `anaconda3`／`miniconda3`／`miniforge3`／`mambaforge` 與 `~\.conda` 底下的 `envs`，找不到再問 `conda env list`。找到就照 `conda activate` 的方式把環境（含 `Library\bin` 裡的 ffmpeg）放進 PATH；已經啟用同名環境時不重複處理；找不到只會提醒，繼續用其他 Python。
 
 * **找 Python 的順序**：`--python` → 環境變數 `PYTHON` → `.venv\Scripts\python.exe` → 已啟用的 conda 環境（`CONDA_PREFIX`，版本不到 3.11 就略過）→ `py -3` 啟動器 → PATH 上的 `python`（會跳過 Windows 那個只會開 Microsoft Store 的假 `python.exe`）。
 * **被執行原則擋下**（「因為這個系統上已停用指令碼執行」）：改用 `deploy.cmd`（可直接雙擊，參數相同，例如 `deploy.cmd --port 9000`），或執行 `powershell -ExecutionPolicy Bypass -File .\deploy.ps1`。這兩種都只對這一次執行放行，不會改系統設定。

@@ -119,6 +119,10 @@ def test_powershell_script_runs_in_foreground_and_cleans_up():
     # 參數要與 deploy.sh 對齊
     for flag in ("dev", "build", "no-build", "port", "host", "jobs-dir", "python", "open", "help"):
         assert f"'{flag}'" in source, f"deploy.ps1 缺少 --{flag}"
+    # 自動啟用 conda 環境（預設 summery），結束時要把環境變數還原
+    for flag in ("env", "no-conda"):
+        assert f"'{flag}'" in source, f"deploy.ps1 缺少 --{flag}"
+    assert "Restore-CondaEnv" in source and source.count("Restore-CondaEnv") >= 4
 
 
 @pytest.mark.skipif(not PS_SCRIPT.is_file() or not shutil.which("pwsh"), reason="需要 pwsh 才能檢查語法")
