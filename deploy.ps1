@@ -82,6 +82,19 @@ function Test-PythonExe([string]$Exe) {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Test-PythonVersion([string]$Exe) {
+    & $Exe -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Get-CondaPython {
+    # conda activate 會設定 CONDA_PREFIX；Windows 的 conda 環境把 python.exe 放在環境根目錄
+    if (-not $env:CONDA_PREFIX) { return $null }
+    $exe = Join-Path $env:CONDA_PREFIX 'python.exe'
+    if (Test-Path -LiteralPath $exe -PathType Leaf) { return $exe }
+    return $null
+}
+
 function Resolve-Python {
     if ($script:Python) {
         if (Test-Path -LiteralPath $script:Python -PathType Leaf) {
@@ -94,6 +107,11 @@ function Resolve-Python {
     $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
     if (Test-Path -LiteralPath $venvPython -PathType Leaf) { return $venvPython }
 
+    # 已啟用的 conda 環境。py 啟動器不認得 conda，所以要排在它前面，否則會選到系統的 Python。
+    # 版本不到 3.11（例如舊版 Anaconda 自動啟用的 base）就略過，繼續往下找。
+    $condaPython = Get-CondaPython
+    if ($condaPython -and (Test-PythonVersion $condaPython)) { return $condaPython }
+
     # Python 官方安裝程式附的 py 啟動器：問它真正的 python.exe 在哪
     if (Get-Command py -CommandType Application -ErrorAction SilentlyContinue) {
         $exe = & py -3 -c 'import sys; print(sys.executable)' 2>$null
@@ -104,15 +122,14 @@ function Resolve-Python {
             if (Test-PythonExe $cmd.Source) { return $cmd.Source }
         }
     }
-    Fail '找不到 Python。請先安裝 Python 3.11 以上版本（winget install Python.Python.3.12）。'
+    Fail '找不到 Python。請先安裝 Python 3.11 以上版本（winget install Python.Python.3.12），用 conda 的話請先 conda activate 對應的環境。'
 }
 
 $Python = Resolve-Python
 if (-not (Test-PythonExe $Python)) { Fail "指定的 Python 不可執行：$Python" }
 
 $PyVersion = & $Python -c "import sys; print('%d.%d' % sys.version_info[:2])"
-& $Python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
-if ($LASTEXITCODE -ne 0) { Fail "需要 Python 3.11 以上，目前是 $PyVersion（$Python）" }
+if (-not (Test-PythonVersion $Python)) { Fail "需要 Python 3.11 以上，目前是 $PyVersion（$Python）" }
 Write-Info "Python $PyVersion（$Python）"
 
 # 缺套件時：在 .venv 裡就直接安裝（只裝一次；之後直接重用），否則用原始碼路徑跑
@@ -129,7 +146,8 @@ if ($LASTEXITCODE -ne 0) {
         # 沒裝成套件就用原始碼路徑跑，免安裝、免動到系統環境（Windows 的路徑分隔是分號）
         $src = Join-Path $Root 'src'
         $env:PYTHONPATH = if ($env:PYTHONPATH) { "$src;$($env:PYTHONPATH)" } else { $src }
-        Write-Warn '未安裝為套件，改用 PYTHONPATH=src 執行（要安裝可先執行：py -m venv .venv; .venv\Scripts\pip install -e .）'
+        $installHint = if ($Python -ieq (Get-CondaPython)) { 'pip install -e .' } else { 'py -m venv .venv; .venv\Scripts\pip install -e .' }
+        Write-Warn "未安裝為套件，改用 PYTHONPATH=src 執行（要安裝可先執行：$installHint）"
     }
 }
 
