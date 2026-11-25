@@ -18,7 +18,7 @@ ASR 與 LLM 走 **OpenAI 相容 API**（可自行指定 `base_url`），並為**
 - [輸出檔案](#輸出檔案)
 - [設定](#設定)
 - [常見 Gateway 設定](#常見-gateway-設定)
-- [一鍵啟動（deploy.sh）](#一鍵啟動deploysh)
+- [一鍵啟動（deploy.sh／deploy.ps1）](#一鍵啟動deploysh)
 - [網頁介面](#網頁介面)
 - [前端開發（Vite）](#前端開發vite)
 - [斷點續傳與快取](#斷點續傳與快取)
@@ -81,10 +81,10 @@ $env:PYTHONPATH = "src"
 py -m summery --help
 ```
 
-啟動網頁介面：`deploy.sh` 是 bash 腳本，Windows 請在 **Git Bash** 或 **WSL** 執行 `./deploy.sh`；或直接在 PowerShell 啟動服務（會使用已建置的 `frontend/dist`，沒有時退回內建介面）：
+啟動網頁介面：用 Windows 版一鍵腳本 `deploy.ps1`（參數與 `deploy.sh` 相同，見[一鍵啟動](#一鍵啟動deploysh)），或**直接雙擊 `deploy.cmd`**：
 
 ```powershell
-summery serve --port 8765 --open
+.\deploy.ps1 --open
 ```
 
 > 小提醒：在 PowerShell 裡含空白或中文的檔名請加引號，例如 `summery run "C:\錄音\1019 會議.m4a"`。
@@ -362,6 +362,25 @@ SUMMERY__LLM__MAX_TOKENS_FIELD=max_completion_tokens   # 新版端點需求
 
 停止服務：**Ctrl+C**，或直接**關閉終端機視窗**。兩種都會觸發同一個清理程序（TERM → 等待 → KILL），並有測試保障（`tests/test_deploy_script.py`：送 SIGHUP 後埠號必須釋放、不留監聽行程）。
 
+### Windows：deploy.ps1
+
+Windows 版做的檢查與 `deploy.sh` 相同，參數也一樣，寫成 `--port 9000` 或 PowerShell 風格的 `-Port 9000` 都可以：
+
+```powershell
+.\deploy.ps1                          # 建置前端 → 啟動服務 → http://127.0.0.1:8765/
+.\deploy.ps1 --open
+.\deploy.ps1 --port 9000 --host 0.0.0.0 --jobs-dir D:\summery_jobs
+.\deploy.ps1 --build                  # 強制重建前端
+.\deploy.ps1 --no-build               # 不建置；沒有 frontend\dist 時用內建介面
+.\deploy.ps1 --dev                    # 開發模式：Python API + Vite 熱更新
+.\deploy.ps1 --python C:\Python312\python.exe
+```
+
+* **找 Python 的順序**：`--python` → 環境變數 `PYTHON` → `.venv\Scripts\python.exe` → `py -3` 啟動器 → PATH 上的 `python`（會跳過 Windows 那個只會開 Microsoft Store 的假 `python.exe`）。
+* **被執行原則擋下**（「因為這個系統上已停用指令碼執行」）：改用 `deploy.cmd`（可直接雙擊，參數相同，例如 `deploy.cmd --port 9000`），或執行 `powershell -ExecutionPolicy Bypass -File .\deploy.ps1`。這兩種都只對這一次執行放行，不會改系統設定。
+* **停止**：Ctrl+C 或關閉 PowerShell 視窗。子行程跟腳本共用同一個視窗，關掉視窗就一起結束。開發模式收尾時會用 `taskkill /T` 把 pnpm → node 整串子行程一起關掉。
+* 支援 Windows PowerShell 5.1（Windows 10/11 內建）與 PowerShell 7+。`deploy.ps1` 必須以 **UTF-8（含 BOM）** 儲存，否則 5.1 讀中文會變亂碼（`.gitattributes` 已設定換行，編輯器存檔時請保留 BOM）。
+
 ---
 
 ## 網頁介面
@@ -508,6 +527,7 @@ frontend/                       Vite + React 前端
   src/styles.css                設計系統（紙感配色、字型、陰影、響應式）
   scripts/ui-check.mjs          渲染級品質檢查（需本機 Chrome）
 deploy.sh                       一鍵啟動／關閉終端即停止
+deploy.ps1 / deploy.cmd         Windows 版一鍵啟動（PowerShell／雙擊）
 ```
 
 ---
