@@ -1,0 +1,9 @@
+# repo 內唯一的 Node 工作區（Python 端不依賴它）
+packages:
+  - frontend
+
+# esbuild 需要跑自己的 postinstall（檢查平台預編譯檔）。pnpm 預設封鎖依賴的
+# build script，因此在此明確核准這一個套件；其餘依賴仍受 pnpm 的
+# supply-chain 檢查保護。
+onlyBuiltDependencies:
+  - esbuild
