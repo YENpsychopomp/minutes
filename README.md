@@ -33,10 +33,13 @@ ASR 與 LLM 走 **OpenAI 相容 API**（可自行指定 `base_url`），並為**
 需要 Python 3.11+ 與 ffmpeg（含 ffprobe）：
 
 ```bash
+### macOS／Linux
+
+```bash
 brew install ffmpeg          # macOS
 # apt install ffmpeg         # Debian/Ubuntu
 
-git clone <repo> && cd summery
+git clone https://github.com/YENpsychopomp/minutes.git && cd minutes
 pip install -e .             # 安裝 summery 指令
 ```
 
@@ -45,6 +48,46 @@ pip install -e .             # 安裝 summery 指令
 ```bash
 PYTHONPATH=src python3 -m summery --help
 ```
+
+### Windows
+
+以下指令在 **PowerShell** 執行。先用 winget 安裝 Python、ffmpeg 與 Git（裝完請**重開 PowerShell**，讓 PATH 生效）：
+
+```powershell
+winget install Python.Python.3.12
+winget install Gyan.FFmpeg
+winget install Git.Git
+
+ffmpeg -version; ffprobe -version   # 確認兩者都找得到
+```
+
+> 沒有 winget 時：Python 從 <https://www.python.org/downloads/> 安裝（勾選「Add python.exe to PATH」），ffmpeg 可下載 <https://www.gyan.dev/ffmpeg/builds/> 的 release 版，解壓後把其中的 `bin` 資料夾加入 PATH。
+
+下載專案並安裝（建議用虛擬環境）：
+
+```powershell
+git clone https://github.com/YENpsychopomp/minutes.git
+cd minutes
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1      # 若被執行原則擋下：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -e .
+summery --help
+```
+
+不想安裝也可以直接用原始碼執行：
+
+```powershell
+$env:PYTHONPATH = "src"
+py -m summery --help
+```
+
+啟動網頁介面：`deploy.sh` 是 bash 腳本，Windows 請在 **Git Bash** 或 **WSL** 執行 `./deploy.sh`；或直接在 PowerShell 啟動服務（會使用已建置的 `frontend/dist`，沒有時退回內建介面）：
+
+```powershell
+summery serve --port 8765 --open
+```
+
+> 小提醒：在 PowerShell 裡含空白或中文的檔名請加引號，例如 `summery run "C:\錄音\1019 會議.m4a"`。
 
 ---
 
