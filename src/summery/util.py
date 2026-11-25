@@ -8,6 +8,7 @@ import math
 import os
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -73,9 +74,18 @@ def fmt_bytes(n: float | None) -> str:
 def atomic_write_text(path: os.PathLike[str] | str, text: str, *, encoding: str = "utf-8") -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + f".tmp{os.getpid()}")
+    tmp = p.with_name(p.name + f".tmp{os.getpid()}-{threading.get_ident()}")
     tmp.write_text(text, encoding=encoding)
-    os.replace(tmp, p)
+    # Windows：別的執行緒（例如 Web UI 輪詢 state.json）正開著目標檔時 os.replace 會被拒，稍等再試
+    for attempt in range(40):
+        try:
+            os.replace(tmp, p)
+            return p
+        except PermissionError:
+            if attempt == 39:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.025)
     return p
 
 
