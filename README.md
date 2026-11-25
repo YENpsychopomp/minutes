@@ -71,8 +71,11 @@ conda init powershell              # 讓 PowerShell 認得 conda activate；完�
 conda create -n summery -c conda-forge python=3.12 ffmpeg git -y
 conda activate summery
 
-ffmpeg -version; ffprobe -version   # 確認兩者都找得到
+ffmpeg -version                     # 確認兩者都找得到
+ffprobe -version
 ```
+
+> 用 Anaconda Prompt（cmd）也可以照著做；兩者只差在少數語法：cmd 不認得 `;` 分隔指令（要分行或用 `&&`），設定環境變數要用 `set PYTHONPATH=src` 而不是 `$env:PYTHONPATH = "src"`。
 
 **3. 下載專案並安裝**：
 
