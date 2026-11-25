@@ -1,0 +1,101 @@
+# summery 設定檔範例
+# ---------------------------------------------------------------------------
+# 複製成自己的設定檔後修改：
+#   cp config/config.example.toml my.toml
+#   summery run 講座.mp4 -c my.toml
+# 也可以隨時用 --set 覆蓋單一欄位（例：--set chunking.target_seconds=300）
+# 或環境變數（SUMMERY_<區塊>_<欄位>，例：SUMMERY__CHUNKING__TARGET_SECONDS=300）
+# 所有欄位都是選擇性的，未寫出來的欄位使用下面列出的預設值。
+# ---------------------------------------------------------------------------
+
+work_dir = ".summery_work"  # 中間檔與 chunk 快取（同一來源+參數會自動續跑）
+ffmpeg_bin = "ffmpeg"       # 需要 ffmpeg / ffprobe 在 PATH，或 here 給絕對路徑
+ffprobe_bin = "ffprobe"
+log_level = "INFO"          # DEBUG / INFO / WARNING / ERROR
+
+# ---------------------------------------------------------------- 語音轉文字
+[asr]
+# 任何 OpenAI 相容 Gateway 都可以：Azure OpenAI、vLLM、Together、LiteLLM、自建服務…
+base_url = "https://api.openai.com/v1"
+model = "whisper-1"         # 例：gpt-4o-transcribe、whisper-1、azure 部署名稱
+# api_key = ""              # 建議留空，改用環境變數（見 api_key_env）
+api_key_env = "ASR_API_KEY" # 也接受 OPENAI_API_KEY / LLM_API_KEY 作為別名
+# language = ""             # null = 自動偵測；可填 "zh"、"en"、"vi"…
+response_format = "verbose_json"  # 需要時間戳；只要純文字可改 "text"
+timestamp_granularity = ["segment"] # 加 "word" 可取詞級時間戳（部分服務不支援）
+send_timestamp_granularity = true   # Gateway 不接受此參數時設 false
+send_language = true
+send_temperature = false
+temperature = 0.0
+extra_params = {}           #  Gateway 專屬欄位，例：{ language_target = "zh-TW" }
+timeout = 600.0             # 單次請求 timeout（長 chunk 建議 ≥ 300）
+max_concurrency = 4         # 平行上傳的 chunk 數
+max_retries = 3             # 429/5xx/網路錯誤的重試次數
+retry_backoff = 2.0         # 指數退避倍數（有 Retry-After 時以標頭為準）
+max_upload_bytes = 25165824 # 24 MiB；chunk 超過會自動二分再傳
+# stub_dir = ""             # 離線測試：從目錄讀 chunk_XXXXX.json 當做 ASR 結果
+
+# ------------------------------------------------------------------ 摘要模型
+[llm]
+base_url = "https://api.openai.com/v1"  # 可與 asr 不同（例如摘要用较大模型）
+model = "gpt-4o-mini"
+# api_key = ""
+api_key_env = "LLM_API_KEY"
+temperature = 0.2
+max_output_tokens = 2000   # 推理型模型（reasoning_content 也吃 max_tokens）建議 8000 以上；
+                           # 被截斷時 summery 會自動以兩倍預算重試一次
+timeout = 300.0
+max_concurrency = 4
+max_retries = 3
+retry_backoff = 2.0
+supports_response_format = true  # 不支援 JSON mode 的模型設 false（400 也會自動降級）
+max_tokens_field = "max_tokens"  # 部分 Gateway 要用 "max_completion_tokens"
+extra_body = {}                  # 例：{ stop = ["</s>"] }
+# stub_dir = ""                  # 離線測試：讀 llm_*.json 當回傳
+
+# ------------------------------------------------------------------ 音訊規格
+[audio]
+sample_rate = 16000  # Whisper 系列建議 16k
+channels = 1         # 單聲道（多軌可由 --audio-stream 選擇）
+codec = "m4a"        # chunk 編碼：m4a / mp3 / ogg / wav。注意：部分 Gateway 不收 m4a/webm
+                     # （會回 400 Invalid or unsupported audio file），此時改 "mp3" 最省流量
+bitrate = "24k"      # 16k mono 語音 24k 已足夠；音樂內容建議 64k 以上
+intermediate_codec = "wav" # 偵測靜音用的中間檔格式
+force_reencode = true      # true = 一律重新編碼（時間軸最穩）；false = 允許直接 copy
+chunk_source = "auto"      # 從哪裡切：auto / wav（正規化後）/ source（原檔）
+chunk_source_auto_threshold_bytes = 805306368 # 原檔超過 768MB 時改用正規化 wav 切塊
+
+# ------------------------------------------------- 長影音切塊（關鍵調校區）
+[chunking]
+target_seconds = 600.0  # 目標塊長（10 分鐘）。長講座可 600~900；會議 300~600
+max_seconds = 900.0     # 單塊上限：會受 asr.max_upload_bytes 與模型準確度限制
+min_seconds = 60.0      # 低於此長度的尾段會併進前一塊
+silence_snap_window = 240.0 # 允許在目標邊界前後多少秒找靜音點（句子中間切會傷準確度）
+silence_min_duration = 0.35 # 多長的靜音才算切口候選
+silence_noise_db = -30.0    # 靜音門檻（dB）；噪聲環境可放寬到 -25
+overlap_seconds = 2.0       # 回溯重疊：每塊往回多讀幾秒，避免跨邊界句子被切走
+skip_silence_scan = false   # true = 固定長度硬切（較快，但句子易被切斷）
+single_chunk_under = 0.0    # >0 時：長度低於此值直接整段上傳，不切塊
+
+# -------------------------------------------------------------------- 摘要
+[summarize]
+language = "zh-TW"      # 摘要輸出語言；"auto" = 追隨逐字稿語言
+style = "standard"      # concise / standard / comprehensive / bullets
+max_input_tokens = 12000 # 逐字稿超過這個量 → 自動改用 map-reduce 分層摘要
+map_chunk_tokens = 7000 # map 階段每區塊約多少 token 送進模型
+reduce_fan_in = 6       # reduce 階段每輪幾份筆記合一份
+chars_per_token = 2.8   # token 估算基準（中日韓字元權重較高）
+chapters = true         # 輸出帶時間戳的章節摘要
+max_chapters = 12
+chapter_block_tokens = 4000
+timestamp_lines = true  # 逐字稿/章節附 [h:mm:ss] 時間戳
+keywords = true
+# custom_instruction = "" # 例："聚焦法遵風險與預算結論"
+
+# ------------------------------------------------------------------ 輸出
+[output]
+formats = ["md", "json", "txt", "srt", "vtt"]
+paragraph_gap = 0.9     # 相鄰 segment 間隔超過幾秒就換段
+paragraph_max_chars = 180
+keep_chunks = false     # true = 保留 chunk 檔（除錯／換模型重跑時有用）
+# stem = ""             # 輸出檔名前綴（null = 來源檔名）

@@ -1,0 +1,29 @@
+# 長影音（2 小時以上講座／研討會）：大塊、高併行、完整摘要
+# 用法：summery run 研討會.mp4 -c config/profile-long-lecture.toml
+
+[chunking]
+target_seconds = 900.0     # 15 分鐘/塊 → 2 小時只有 8 塊，請求數少
+max_seconds = 1200.0
+min_seconds = 120.0
+silence_snap_window = 300.0
+overlap_seconds = 2.5
+
+[asr]
+max_concurrency = 6
+timeout = 900.0
+max_upload_bytes = 25165824
+
+[llm]
+max_concurrency = 6
+max_output_tokens = 3000
+
+[summarize]
+style = "comprehensive"
+max_input_tokens = 12000   # 超過即 map-reduce
+map_chunk_tokens = 7000
+reduce_fan_in = 6
+max_chapters = 16
+
+[audio]
+codec = "m4a"
+bitrate = "24k"

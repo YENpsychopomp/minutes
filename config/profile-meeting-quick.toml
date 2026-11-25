@@ -1,0 +1,21 @@
+# 短會議（30~90 分鐘）：小塊快速出稿、精簡摘要、只要 md/srt
+# 用法：summery run 會議.mp3 -c config/profile-meeting-quick.toml
+
+[chunking]
+target_seconds = 300.0
+max_seconds = 420.0
+min_seconds = 45.0
+overlap_seconds = 2.0
+
+[asr]
+max_concurrency = 4
+
+[summarize]
+style = "concise"
+max_input_tokens = 8000
+map_chunk_tokens = 4000
+max_chapters = 8
+custom_instruction = "重點放在決議、負責人與期限"
+
+[output]
+formats = ["md", "srt"]
